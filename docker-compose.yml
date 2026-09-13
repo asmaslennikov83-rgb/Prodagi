@@ -1,0 +1,7 @@
+services:
+  wb-orders-bot:
+    build: .
+    container_name: wb-orders-bot
+    restart: unless-stopped
+    env_file:
+      - .env
