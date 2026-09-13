@@ -5,6 +5,7 @@ import tempfile
 from datetime import date, datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,7 +13,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import TELEGRAM_BOT_TOKEN, WB_API_KEY_1, WB_API_KEY_2, CABINET_1_NAME, CABINET_2_NAME
+from config import (
+    TELEGRAM_BOT_TOKEN, WB_API_KEY_1, WB_API_KEY_2,
+    CABINET_1_NAME, CABINET_2_NAME, ALLOWED_TELEGRAM_IDS,
+)
 from report_builder import apply_orders, build_products, make_excel, merge_products
 from wb_client import WBApiError, WBClient
 
@@ -23,6 +27,27 @@ class ReportState(StatesGroup):
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+
+class AccessMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = data.get('event_from_user')
+        if user and user.id not in ALLOWED_TELEGRAM_IDS:
+            text = (
+                '⛔ Доступ к боту запрещён.\n\n'
+                f'Ваш Telegram ID: <code>{user.id}</code>\n'
+                'Передайте этот ID администратору бота.'
+            )
+            if isinstance(event, CallbackQuery):
+                await event.answer('⛔ Нет доступа', show_alert=True)
+            elif isinstance(event, Message):
+                await event.answer(text, parse_mode='HTML')
+            return None
+        return await handler(event, data)
+
+
+dp.message.outer_middleware(AccessMiddleware())
+dp.callback_query.outer_middleware(AccessMiddleware())
 
 
 def start_kb():
@@ -171,6 +196,7 @@ async def main():
     if not TELEGRAM_BOT_TOKEN: missing.append('TELEGRAM_BOT_TOKEN')
     if not WB_API_KEY_1: missing.append('WB_API_KEY_1')
     if not WB_API_KEY_2: missing.append('WB_API_KEY_2')
+    if not ALLOWED_TELEGRAM_IDS: missing.append('ALLOWED_TELEGRAM_IDS')
     if missing:
         raise RuntimeError('Не заполнены переменные .env: ' + ', '.join(missing))
     await dp.start_polling(bot)
