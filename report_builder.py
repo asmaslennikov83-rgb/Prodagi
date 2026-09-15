@@ -32,7 +32,8 @@ def build_products(cards: list[dict], cabinet: str) -> list[Product]:
     products: list[Product] = []
     for card in cards:
         nm_id = int(card.get('nmID') or 0)
-        vendor = s(card.get('vendorCode'))
+        # Seller article is normally vendorCode in Content API. Keep fallbacks for compatibility.
+        vendor = s(card.get('vendorCode') or card.get('supplierArticle') or card.get('vendor_code'))
         name = s(card.get('title'))
         sizes = card.get('sizes') or []
         if not sizes:
@@ -111,6 +112,12 @@ def apply_orders(products: list[Product], orders: list[dict], source: str) -> in
         if p is None:
             unmatched += 1
             continue
+
+        # Orders API also contains seller article (supplierArticle).
+        # Use it as a fallback if Content API returned an empty vendorCode.
+        if not p.vendor_code:
+            p.vendor_code = s(o.get('supplierArticle') or o.get('vendorCode') or o.get('vendor_code'))
+
         model = order_model(o, source)
         if model == 'FBS':
             p.fbs += 1
@@ -168,13 +175,19 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
     out: list[Product] = []
     for group in groups.values():
         first = group[0]
+        # Do not lose seller article/name when the first matched card has an empty field.
+        vendor_code = next((g.vendor_code for g in group if g.vendor_code), '')
+        name = next((g.name for g in group if g.name), '')
+        nm_id = next((g.nm_id for g in group if g.nm_id), 0)
+        chrt_id = next((g.chrt_id for g in group if g.chrt_id), 0)
+        size = next((g.size for g in group if g.size and g.size != '0'), first.size or '0')
         out.append(Product(
             cabinet='Оба кабинета' if len({g.cabinet for g in group}) > 1 else first.cabinet,
-            nm_id=first.nm_id,
-            chrt_id=first.chrt_id,
-            vendor_code=first.vendor_code,
-            name=first.name,
-            size=first.size or '0',
+            nm_id=nm_id,
+            chrt_id=chrt_id,
+            vendor_code=vendor_code,
+            name=name,
+            size=size or '0',
             barcodes=set().union(*(g.barcodes for g in group)),
             fbo=sum(g.fbo for g in group),
             fbs=sum(g.fbs for g in group),
