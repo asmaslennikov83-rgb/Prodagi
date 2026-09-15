@@ -352,18 +352,18 @@ def make_procurement_excel(
     red = 'FCE4D6'
     thin = Side(style='thin', color='D9E2F3')
 
-    ws.merge_cells('A1:N1')
+    ws.merge_cells('A1:O1')
     ws['A1'] = 'Расчёт закупки Wildberries'
     ws['A1'].font = Font(bold=True, size=16, color='FFFFFF')
     ws['A1'].fill = PatternFill('solid', fgColor=navy)
     ws['A1'].alignment = Alignment(horizontal='center')
-    ws.merge_cells('A2:N2')
+    ws.merge_cells('A2:O2')
     ws['A2'] = f'Кабинет: {cabinet_name} | Период продаж: {period_text} ({analysis_days} дн.)'
-    ws.merge_cells('A3:N3')
+    ws.merge_cells('A3:O3')
     ws['A3'] = f'Целевой запас: {target_days} дн. | Коэффициент: {coefficient:g}'
 
     headers = [
-        'Баркод(ы)', 'Наименование', 'Размер', 'Заказы FBO', 'Заказы FBS',
+        'Баркод(ы)', 'Артикул продавца', 'Наименование', 'Размер', 'Заказы FBO', 'Заказы FBS',
         'Продажи комплектами', 'Общий расход', 'Среднее/день', 'Запас, дней',
         'Коэффициент', 'Необходимо иметь', 'Остаток', 'К закупке', 'Примечание'
     ]
@@ -376,7 +376,7 @@ def make_procurement_excel(
 
     for r_idx, r in enumerate(result.rows, start=header_row + 1):
         values = [
-            ', '.join(sorted(r.product.barcodes)), r.product.name, r.product.size or '0',
+            ', '.join(sorted(r.product.barcodes)), r.product.vendor_code, r.product.name, r.product.size or '0',
             r.product.fbo, r.product.fbs, r.bundle_sales_units, r.total_consumption,
             r.average_per_day, target_days, coefficient, r.required_stock,
             r.physical_stock, r.purchase_qty, r.note,
@@ -384,21 +384,21 @@ def make_procurement_excel(
         for c_idx, value in enumerate(values, 1):
             cell = ws.cell(r_idx, c_idx, value)
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-            cell.alignment = Alignment(vertical='center', wrap_text=c_idx in (1, 2, 14))
-        ws.cell(r_idx, 8).number_format = '0.00'
-        ws.cell(r_idx, 10).number_format = '0.00'
+            cell.alignment = Alignment(vertical='center', wrap_text=c_idx in (1, 3, 15))
+        ws.cell(r_idx, 9).number_format = '0.00'
+        ws.cell(r_idx, 11).number_format = '0.00'
         if r.purchase_qty > 0:
-            ws.cell(r_idx, 13).fill = PatternFill('solid', fgColor=green)
-            ws.cell(r_idx, 13).font = Font(bold=True)
+            ws.cell(r_idx, 14).fill = PatternFill('solid', fgColor=green)
+            ws.cell(r_idx, 14).font = Font(bold=True)
         if r.note:
-            ws.cell(r_idx, 14).fill = PatternFill('solid', fgColor=yellow)
+            ws.cell(r_idx, 15).fill = PatternFill('solid', fgColor=yellow)
 
-    widths = [32, 48, 12, 13, 13, 20, 14, 14, 12, 13, 18, 14, 14, 26]
+    widths = [32, 24, 48, 12, 13, 13, 20, 14, 14, 12, 13, 18, 14, 14, 26]
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = 'A6'
     if result.rows:
-        ws.auto_filter.ref = f'A5:N{header_row + len(result.rows)}'
+        ws.auto_filter.ref = f'A5:O{header_row + len(result.rows)}'
     ws.row_dimensions[1].height = 24
     ws.row_dimensions[5].height = 36
 
