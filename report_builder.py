@@ -13,11 +13,13 @@ class Product:
     nm_id: int
     chrt_id: int
     vendor_code: str
+    brand: str
     name: str
     size: str
     barcodes: set[str] = field(default_factory=set)
     fbo: int = 0
     fbs: int = 0
+    fbo_stock: int = 0
 
     @property
     def total(self) -> int:
@@ -34,16 +36,17 @@ def build_products(cards: list[dict], cabinet: str) -> list[Product]:
         nm_id = int(card.get('nmID') or 0)
         # Seller article is normally vendorCode in Content API. Keep fallbacks for compatibility.
         vendor = s(card.get('vendorCode') or card.get('supplierArticle') or card.get('vendor_code'))
+        brand = s(card.get('brand'))
         name = s(card.get('title'))
         sizes = card.get('sizes') or []
         if not sizes:
-            products.append(Product(cabinet, nm_id, 0, vendor, name, '0', set()))
+            products.append(Product(cabinet, nm_id, 0, vendor, brand, name, '0', set()))
             continue
         for size in sizes:
             chrt_id = int(size.get('chrtID') or 0)
             tech_size = s(size.get('techSize') or size.get('wbSize')) or '0'
             barcodes = {s(x) for x in (size.get('skus') or []) if s(x)}
-            products.append(Product(cabinet, nm_id, chrt_id, vendor, name, tech_size, barcodes))
+            products.append(Product(cabinet, nm_id, chrt_id, vendor, brand, name, tech_size, barcodes))
     return products
 
 
@@ -177,6 +180,7 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
         first = group[0]
         # Do not lose seller article/name when the first matched card has an empty field.
         vendor_code = next((g.vendor_code for g in group if g.vendor_code), '')
+        brand = next((g.brand for g in group if g.brand), '')
         name = next((g.name for g in group if g.name), '')
         nm_id = next((g.nm_id for g in group if g.nm_id), 0)
         chrt_id = next((g.chrt_id for g in group if g.chrt_id), 0)
@@ -186,11 +190,13 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
             nm_id=nm_id,
             chrt_id=chrt_id,
             vendor_code=vendor_code,
+            brand=brand,
             name=name,
             size=size or '0',
             barcodes=set().union(*(g.barcodes for g in group)),
             fbo=sum(g.fbo for g in group),
             fbs=sum(g.fbs for g in group),
+            fbo_stock=sum(g.fbo_stock for g in group),
         ))
     return out
 
@@ -199,7 +205,7 @@ def make_excel(products: Iterable[Product], path: str | Path, title: str, period
     wb = Workbook()
     ws = wb.active
     ws.title = 'Заказы'
-    ws.append(['Баркод(ы)', 'Артикул продавца', 'nmID', 'Наименование', 'Размер', 'Заказы FBO', 'Заказы FBS', 'Всего'])
+    ws.append(['Баркод(ы)', 'Артикул продавца', 'Бренд', 'nmID', 'Наименование', 'Размер', 'Заказы FBO', 'Заказы FBS', 'Всего'])
 
     header_fill = PatternFill('solid', fgColor='1F4E78')
     header_font = Font(color='FFFFFF', bold=True)
@@ -209,14 +215,14 @@ def make_excel(products: Iterable[Product], path: str | Path, title: str, period
         c.alignment = Alignment(horizontal='center', vertical='center')
 
     for p in sorted(products, key=lambda x: (x.name.casefold(), x.vendor_code.casefold(), x.size.casefold())):
-        ws.append([', '.join(sorted(p.barcodes)), p.vendor_code, p.nm_id, p.name, p.size or '0', p.fbo, p.fbs, p.total])
+        ws.append([', '.join(sorted(p.barcodes)), p.vendor_code, p.brand, p.nm_id, p.name, p.size or '0', p.fbo, p.fbs, p.total])
 
     for row in ws.iter_rows():
         for c in row:
             c.border = Border(left=thin, right=thin, top=thin, bottom=thin)
             c.alignment = Alignment(vertical='center')
 
-    for col, width in {'A': 32, 'B': 25, 'C': 15, 'D': 52, 'E': 14, 'F': 15, 'G': 15, 'H': 15}.items():
+    for col, width in {'A': 32, 'B': 25, 'C': 20, 'D': 15, 'E': 52, 'F': 14, 'G': 15, 'H': 15, 'I': 15}.items():
         ws.column_dimensions[col].width = width
     ws.freeze_panes = 'A2'
     ws.auto_filter.ref = ws.dimensions

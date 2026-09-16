@@ -65,6 +65,38 @@ class WBClient:
             cursor = {'limit': 100, 'nmID': nm_id, 'updatedAt': updated_at}
         return result
 
+
+    async def get_fbo_stocks(self, nm_ids: list[int] | None = None) -> dict[int, int]:
+        """Return current WB (FBO) stock aggregated by chrtId.
+
+        Uses the current Analytics endpoint /api/analytics/v1/stocks-report/wb-warehouses.
+        One response row is one size in one WB warehouse; quantities are summed across warehouses.
+        """
+        url = f'{WB_ANALYTICS_URL}/api/analytics/v1/stocks-report/wb-warehouses'
+        ids = sorted({int(x) for x in (nm_ids or []) if x})
+        # API accepts up to 1000 nmIds. Empty list means all products.
+        batches = [ids[i:i + 1000] for i in range(0, len(ids), 1000)] if ids else [[]]
+        totals: dict[int, int] = {}
+        for batch in batches:
+            offset = 0
+            limit = 250000
+            while True:
+                payload = {'nmIds': batch, 'chrtIds': [], 'limit': limit, 'offset': offset}
+                data = await self._request('POST', url, json=payload) or {}
+                items = (data.get('data') or {}).get('items') or []
+                for row in items:
+                    try:
+                        chrt = int(row.get('chrtId') or row.get('chrtID') or 0)
+                        qty = int(row.get('quantity') or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if chrt:
+                        totals[chrt] = totals.get(chrt, 0) + qty
+                if len(items) < limit:
+                    break
+                offset += len(items)
+        return totals
+
     async def get_orders_legacy(self, date_from: date, date_to: date) -> list[dict]:
         """Detailed orders. We fetch changes since date_from, then filter by actual order `date`.
         This endpoint exposes barcode + warehouseType, which is ideal for FBO/FBS split.

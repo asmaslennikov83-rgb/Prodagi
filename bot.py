@@ -96,6 +96,15 @@ def coefficient_kb():
     return kb.as_markup()
 
 
+def stock_mode_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text='🏢 Только FBO', callback_data='stockmode:fbo')
+    kb.button(text='📦 Только FBS', callback_data='stockmode:fbs')
+    kb.button(text='➕ FBO + FBS', callback_data='stockmode:both')
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 @dp.message(CommandStart())
 async def start(m: Message):
     await m.answer(
@@ -178,13 +187,36 @@ async def choose_stock_days(c: CallbackQuery, state: FSMContext):
 async def choose_coefficient(c: CallbackQuery, state: FSMContext):
     coefficient = float(c.data.split(':', 1)[1])
     await state.update_data(coefficient=coefficient)
-    await state.set_state(PurchaseState.stock_file)
     await c.message.edit_text(
-        '📎 Отправьте файл остатков на вашем складе.\n\n'
-        'Поддерживаются <b>.xls</b> и <b>.xlsx</b>.\n'
-        'В файле должны быть колонки <b>Код</b> и <b>Доступно</b>.',
-        parse_mode='HTML',
+        'Какие текущие остатки учитывать при расчёте закупки?',
+        reply_markup=stock_mode_kb(),
     )
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith('stockmode:'))
+async def choose_stock_mode(c: CallbackQuery, state: FSMContext):
+    stock_mode = c.data.split(':', 1)[1]
+    await state.update_data(stock_mode=stock_mode)
+    if stock_mode == 'fbo':
+        # Local/FBS stock file is intentionally skipped in FBO-only mode.
+        await state.update_data(stock_path=None, stock_parse_errors=[], stock_rows=0)
+        await state.set_state(PurchaseState.bundles_file)
+        await c.message.edit_text(
+            '✅ Будут учтены только текущие остатки FBO на складах Wildberries.\n\n'
+            'Теперь отправьте <b>шаблон комплектов</b> (.xls или .xlsx).',
+            parse_mode='HTML',
+        )
+    else:
+        await state.set_state(PurchaseState.stock_file)
+        label = 'только FBS' if stock_mode == 'fbs' else 'FBO + FBS'
+        await c.message.edit_text(
+            f'Выбрано: <b>{label}</b>.\n\n'
+            '📎 Отправьте файл остатков на вашем складе (FBS).\n'
+            'Поддерживаются <b>.xls</b> и <b>.xlsx</b>.\n'
+            'В файле должны быть колонки <b>Код</b> и <b>Доступно</b>.',
+            parse_mode='HTML',
+        )
     await c.answer()
 
 
@@ -250,13 +282,19 @@ async def receive_bundles_file(m: Message, state: FSMContext):
     await generate_purchase(m, state)
 
 
-async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date):
+async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, need_fbo_stock: bool = False):
     client = WBClient(token)
     cards_task = asyncio.create_task(client.get_all_cards())
     orders_task = asyncio.create_task(client.get_orders(from_d, to_d))
     cards, (orders, source) = await asyncio.gather(cards_task, orders_task)
     products = build_products(cards, cabinet_name)
     unmatched = apply_orders(products, orders, source)
+    if need_fbo_stock:
+        nm_ids = [p.nm_id for p in products if p.nm_id]
+        fbo_by_chrt = await client.get_fbo_stocks(nm_ids)
+        for p in products:
+            if p.chrt_id:
+                p.fbo_stock = fbo_by_chrt.get(p.chrt_id, 0)
     return products, source, unmatched
 
 
@@ -270,9 +308,14 @@ async def generate_purchase(m: Message, state: FSMContext):
         analysis_days = int(data['analysis_days'])
         target_days = int(data['target_days'])
         coefficient = float(data['coefficient'])
+        stock_mode = data.get('stock_mode', 'fbs')
         cabinet = data['cabinet']
+        need_fbo_stock = stock_mode in {'fbo', 'both'}
 
-        stocks, stock_errors_now = load_stock_file(data['stock_path'])
+        if stock_mode in {'fbs', 'both'}:
+            stocks, stock_errors_now = load_stock_file(data['stock_path'])
+        else:
+            stocks, stock_errors_now = {}, []
         bundles, bundle_errors_now = load_bundles_file(data['bundle_path'])
         initial_errors = list(data.get('stock_parse_errors') or []) + list(data.get('bundle_parse_errors') or [])
         # Avoid duplicates if the file was parsed twice.
@@ -280,17 +323,17 @@ async def generate_purchase(m: Message, state: FSMContext):
         initial_errors += [e for e in bundle_errors_now if e not in initial_errors]
 
         if cabinet == '1':
-            products, src, unmatched = await cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d)
+            products, src, unmatched = await cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, need_fbo_stock)
             cabinet_name = CABINET_1_NAME
             sources = {src}
         elif cabinet == '2':
-            products, src, unmatched = await cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d)
+            products, src, unmatched = await cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, need_fbo_stock)
             cabinet_name = CABINET_2_NAME
             sources = {src}
         else:
             r1, r2 = await asyncio.gather(
-                cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d),
-                cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d),
+                cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, need_fbo_stock),
+                cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, need_fbo_stock),
             )
             products = merge_products(r1[0], r2[0])
             sources = {r1[1], r2[1]}
@@ -299,11 +342,12 @@ async def generate_purchase(m: Message, state: FSMContext):
 
         result = calculate_procurement(
             products=products,
-            stocks=stocks,
+            stocks_fbs=stocks,
             bundles=bundles,
             analysis_days=analysis_days,
             target_days=target_days,
             coefficient=coefficient,
+            stock_mode=stock_mode,
             initial_errors=initial_errors,
         )
 
@@ -312,7 +356,7 @@ async def generate_purchase(m: Message, state: FSMContext):
         make_procurement_excel(
             result, output_path, cabinet_name,
             f'{from_d:%d.%m.%Y} — {to_d:%d.%m.%Y}',
-            analysis_days, target_days, coefficient,
+            analysis_days, target_days, coefficient, stock_mode,
         )
         purchase_total = sum(r.purchase_qty for r in result.rows)
         purchase_positions = sum(1 for r in result.rows if r.purchase_qty > 0)
@@ -322,6 +366,7 @@ async def generate_purchase(m: Message, state: FSMContext):
             f'📅 Продажи: {from_d:%d.%m.%Y} — {to_d:%d.%m.%Y}\n'
             f'📦 Запас: {target_days} дней\n'
             f'✖️ Коэффициент: {coefficient:g}\n'
+            f'📊 Остатки: { {"fbo": "только FBO", "fbs": "только FBS", "both": "FBO + FBS"}.get(stock_mode, stock_mode) }\n'
             f'🛒 К закупке: {purchase_total} шт. / {purchase_positions} позиций\n'
             f'🔎 Не сопоставлено заказов WB: {unmatched}\n'
             f'⚠️ Записей на листе «Ошибки»: {len(result.errors)}'
