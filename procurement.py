@@ -52,6 +52,13 @@ class PurchaseRow:
     def physical_stock(self) -> int:
         return self.selected_stock
 
+    @property
+    def days_remaining(self) -> float:
+        """How many days the selected stock will last at the current average order rate."""
+        if self.average_per_day <= 0:
+            return 0.0
+        return self.physical_stock / self.average_per_day
+
 
 @dataclass
 class BundleAuditRow:
@@ -390,21 +397,21 @@ def make_procurement_excel(
     red = 'FCE4D6'
     thin = Side(style='thin', color='D9E2F3')
 
-    ws.merge_cells('A1:R1')
+    ws.merge_cells('A1:S1')
     ws['A1'] = 'Расчёт закупки Wildberries'
     ws['A1'].font = Font(bold=True, size=16, color='FFFFFF')
     ws['A1'].fill = PatternFill('solid', fgColor=navy)
     ws['A1'].alignment = Alignment(horizontal='center')
-    ws.merge_cells('A2:R2')
+    ws.merge_cells('A2:S2')
     ws['A2'] = f'Кабинет: {cabinet_name} | Период продаж: {period_text} ({analysis_days} дн.)'
-    ws.merge_cells('A3:R3')
+    ws.merge_cells('A3:S3')
     mode_label = {'fbo': 'Только FBO', 'fbs': 'Только FBS', 'both': 'FBO + FBS'}.get(stock_mode, stock_mode)
     ws['A3'] = f'Целевой запас: {target_days} дн. | Коэффициент: {coefficient:g} | Учитываемые остатки: {mode_label}'
 
     headers = [
-        'Баркод(ы)', 'Артикул продавца', 'Бренд', 'Наименование', 'Размер', 'Заказы FBO', 'Заказы FBS',
-        'Продажи комплектами', 'Общий расход', 'Среднее/день', 'Запас, дней',
-        'Коэффициент', 'Необходимо иметь', 'Остаток FBO', 'Остаток FBS', 'Остаток учтён', 'К закупке', 'Примечание'
+        'Баркод(ы)', 'Артикул продавца', 'Бренд', 'Наименование', 'К закупке', 'На сколько хватит дней',
+        'Размер', 'Заказы FBO', 'Заказы FBS', 'Продажи комплектами', 'Общий расход', 'Среднее/день',
+        'Запас, дней', 'Коэффициент', 'Необходимо иметь', 'Остаток FBO', 'Остаток FBS', 'Остаток учтён', 'Примечание'
     ]
     header_row = 5
     for col, value in enumerate(headers, 1):
@@ -415,29 +422,30 @@ def make_procurement_excel(
 
     for r_idx, r in enumerate(result.rows, start=header_row + 1):
         values = [
-            ', '.join(sorted(r.product.barcodes)), r.product.vendor_code, r.product.brand, r.product.name, r.product.size or '0',
-            r.product.fbo, r.product.fbs, r.bundle_sales_units, r.total_consumption,
-            r.average_per_day, target_days, coefficient, r.required_stock,
-            r.fbo_physical_stock, r.fbs_physical_stock, r.physical_stock, r.purchase_qty, r.note,
+            ', '.join(sorted(r.product.barcodes)), r.product.vendor_code, r.product.brand, r.product.name,
+            r.purchase_qty, r.days_remaining, r.product.size or '0', r.product.fbo, r.product.fbs,
+            r.bundle_sales_units, r.total_consumption, r.average_per_day, target_days, coefficient,
+            r.required_stock, r.fbo_physical_stock, r.fbs_physical_stock, r.physical_stock, r.note,
         ]
         for c_idx, value in enumerate(values, 1):
             cell = ws.cell(r_idx, c_idx, value)
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-            cell.alignment = Alignment(vertical='center', wrap_text=c_idx in (1, 4, 18))
-        ws.cell(r_idx, 10).number_format = '0.00'
+            cell.alignment = Alignment(vertical='center', wrap_text=c_idx in (1, 4, 19))
+        ws.cell(r_idx, 6).number_format = '0.00'
         ws.cell(r_idx, 12).number_format = '0.00'
+        ws.cell(r_idx, 14).number_format = '0.00'
         if r.purchase_qty > 0:
-            ws.cell(r_idx, 17).fill = PatternFill('solid', fgColor=green)
-            ws.cell(r_idx, 17).font = Font(bold=True)
+            ws.cell(r_idx, 5).fill = PatternFill('solid', fgColor=green)
+            ws.cell(r_idx, 5).font = Font(bold=True)
         if r.note:
-            ws.cell(r_idx, 18).fill = PatternFill('solid', fgColor=yellow)
+            ws.cell(r_idx, 19).fill = PatternFill('solid', fgColor=yellow)
 
-    widths = [32, 24, 20, 48, 12, 13, 13, 20, 14, 14, 12, 13, 18, 14, 14, 16, 14, 26]
+    widths = [32, 24, 20, 48, 14, 20, 12, 13, 13, 20, 14, 14, 12, 13, 18, 14, 14, 16, 26]
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = 'A6'
     if result.rows:
-        ws.auto_filter.ref = f'A5:R{header_row + len(result.rows)}'
+        ws.auto_filter.ref = f'A5:S{header_row + len(result.rows)}'
     ws.row_dimensions[1].height = 24
     ws.row_dimensions[5].height = 36
 
