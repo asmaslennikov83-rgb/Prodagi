@@ -1,6 +1,8 @@
 import asyncio
+import html
 import os
 import re
+import shutil
 import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,8 +32,15 @@ class PurchaseState(StatesGroup):
     bundles_file = State()
 
 
+class ManualState(StatesGroup):
+    barcode = State()
+
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+DATA_DIR = Path(os.getenv('BOT_DATA_DIR', 'data'))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -58,7 +67,31 @@ dp.callback_query.outer_middleware(AccessMiddleware())
 def start_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text='📦 Рассчитать закупку', callback_data='purchase')
+    kb.button(text='🔎 Ручная проверка по ШК', callback_data='manual_check')
+    kb.adjust(1)
     return kb.as_markup()
+
+
+def _last_file_path(user_id: int, kind: str) -> Path | None:
+    for suffix in ('.xlsx', '.xls'):
+        p = DATA_DIR / f'{user_id}_{kind}{suffix}'
+        if p.exists():
+            return p
+    return None
+
+
+def _save_last_file(user_id: int, kind: str, source_path: str) -> Path:
+    suffix = Path(source_path).suffix.casefold()
+    for old_suffix in ('.xlsx', '.xls'):
+        old = DATA_DIR / f'{user_id}_{kind}{old_suffix}'
+        if old.exists() and old.suffix.casefold() != suffix:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    dest = DATA_DIR / f'{user_id}_{kind}{suffix}'
+    shutil.copy2(source_path, dest)
+    return dest
 
 
 def cabinets_kb():
@@ -114,10 +147,40 @@ async def start(m: Message):
     )
 
 
+@dp.callback_query(F.data == 'manual_check')
+async def manual_check_start(c: CallbackQuery, state: FSMContext):
+    await cleanup_state_files(state)
+    await state.clear()
+    await state.update_data(flow='manual', cabinet='both')
+    await state.set_state(ManualState.barcode)
+    await c.message.edit_text(
+        '🔎 <b>Ручная проверка по ШК</b>\n\n'
+        'Введите один баркод товара:',
+        parse_mode='HTML',
+    )
+    await c.answer()
+
+
+@dp.message(ManualState.barcode)
+async def manual_barcode_value(m: Message, state: FSMContext):
+    barcode = re.sub(r'\s+', '', (m.text or '').strip())
+    if not barcode or not re.fullmatch(r'\d{5,30}', barcode):
+        await m.answer('❌ Введите один числовой баркод без пробелов.')
+        return
+    await state.update_data(flow='manual', cabinet='both', manual_barcode=barcode)
+    await state.set_state(None)
+    await m.answer(
+        'Выберите период продаж для расчёта средней скорости.\n'
+        'Сегодняшний день в быстрые периоды не входит:',
+        reply_markup=periods_kb(),
+    )
+
+
 @dp.callback_query(F.data == 'purchase')
 async def choose_cab(c: CallbackQuery, state: FSMContext):
     await cleanup_state_files(state)
     await state.clear()
+    await state.update_data(flow='purchase')
     await c.message.edit_text('Выберите кабинет:', reply_markup=cabinets_kb())
     await c.answer()
 
@@ -198,6 +261,11 @@ async def choose_coefficient(c: CallbackQuery, state: FSMContext):
 async def choose_stock_mode(c: CallbackQuery, state: FSMContext):
     stock_mode = c.data.split(':', 1)[1]
     await state.update_data(stock_mode=stock_mode)
+    data = await state.get_data()
+    if data.get('flow') == 'manual':
+        await c.answer()
+        await generate_manual_check(c.message, state, c.from_user.id)
+        return
     if stock_mode == 'fbo':
         # Local/FBS stock file is intentionally skipped in FBO-only mode.
         await state.update_data(stock_path=None, stock_parse_errors=[], stock_rows=0)
@@ -251,6 +319,7 @@ async def receive_stock_file(m: Message, state: FSMContext):
         except OSError: pass
         await m.answer('❌ В файле остатков не найдено ни одного товара.')
         return
+    _save_last_file(m.from_user.id, 'stock', path)
     await state.update_data(stock_path=path, stock_parse_errors=errors, stock_rows=len(stocks))
     await state.set_state(PurchaseState.bundles_file)
     await m.answer(
@@ -278,11 +347,12 @@ async def receive_bundles_file(m: Message, state: FSMContext):
         except OSError: pass
         await m.answer('❌ В шаблоне не найдено ни одного комплекта.')
         return
+    _save_last_file(m.from_user.id, 'bundles', bundle_path)
     await state.update_data(bundle_path=bundle_path, bundle_parse_errors=bundle_errors)
     await generate_purchase(m, state)
 
 
-async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, need_fbo_stock: bool = False):
+async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, need_fbo_stock: bool = False, need_fbs_stock: bool = False):
     client = WBClient(token)
     cards_task = asyncio.create_task(client.get_all_cards())
     orders_task = asyncio.create_task(client.get_orders(from_d, to_d))
@@ -295,7 +365,161 @@ async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, 
         for p in products:
             if p.chrt_id:
                 p.fbo_stock = fbo_by_chrt.get(p.chrt_id, 0)
+    if need_fbs_stock:
+        chrt_ids = [p.chrt_id for p in products if p.chrt_id]
+        fbs_by_chrt = await client.get_fbs_stocks(chrt_ids)
+        for p in products:
+            if p.chrt_id:
+                p.fbs_stock = fbs_by_chrt.get(p.chrt_id, 0)
     return products, source, unmatched
+
+
+def _find_product_by_barcode(products, barcode: str):
+    return next((p for p in products if barcode in p.barcodes), None)
+
+
+def _find_row_for_product(result, product):
+    if product is None:
+        return None
+    return next((r for r in result.rows if r.product.barcodes & product.barcodes), None)
+
+
+def _fmt_num(value: float, digits: int = 2) -> str:
+    text = f'{value:.{digits}f}'.rstrip('0').rstrip('.')
+    return text.replace('.', ',')
+
+
+async def generate_manual_check(m: Message, state: FSMContext, user_id: int):
+    data = await state.get_data()
+    barcode = data.get('manual_barcode', '')
+    stock_mode = data.get('stock_mode', 'fbs')
+    bundle_path = _last_file_path(user_id, 'bundles')
+
+    if bundle_path is None:
+        await m.answer(
+            '❌ Нет сохранённого шаблона комплектов.\n\n'
+            'Сначала один раз выполните обычный расчёт закупки и загрузите шаблон комплектов.'
+        )
+        await state.clear()
+        return
+    status = await m.answer(f'⏳ Проверяю ШК {barcode} по двум кабинетам…')
+    try:
+        from_d = date.fromisoformat(data['from_d'])
+        to_d = date.fromisoformat(data['to_d'])
+        analysis_days = int(data['analysis_days'])
+        target_days = int(data['target_days'])
+        coefficient = float(data['coefficient'])
+
+        # Для ручной проверки FBS-остатки всегда получаем напрямую из WB API.
+        stocks = {}
+        bundles, _ = load_bundles_file(bundle_path)
+
+        r1, r2 = await asyncio.gather(
+            cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, True, True),
+            cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, True, True),
+        )
+        products1, products2 = r1[0], r2[0]
+        merged = merge_products(products1, products2)
+
+        # Bundle SKU itself is not purchased; explain this explicitly.
+        bundle = next((b for b in bundles if b.barcode == barcode), None)
+        if bundle:
+            p1 = _find_product_by_barcode(products1, barcode)
+            p2 = _find_product_by_barcode(products2, barcode)
+            fbo1, fbs1 = (p1.fbo, p1.fbs) if p1 else (0, 0)
+            fbo2, fbs2 = (p2.fbo, p2.fbs) if p2 else (0, 0)
+            components = ', '.join(bundle.components)
+            await status.edit_text(
+                f'🧩 <b>{html.escape(bundle.name)}</b>\n'
+                f'ШК: <code>{barcode}</code>\n\n'
+                f'<b>{html.escape(CABINET_1_NAME)}</b>: FBO {fbo1} / FBS {fbs1} / всего {fbo1+fbs1}\n'
+                f'<b>{html.escape(CABINET_2_NAME)}</b>: FBO {fbo2} / FBS {fbs2} / всего {fbo2+fbs2}\n'
+                f'<b>Всего заказов набора:</b> {fbo1+fbs1+fbo2+fbs2}\n'
+                f'<b>Компоненты:</b> {html.escape(components)}\n\n'
+                'Этот ШК является комплектом. Сам комплект не закупается — закупка рассчитывается по его компонентам.',
+                parse_mode='HTML',
+            )
+            await state.clear()
+            return
+
+        merged_product = _find_product_by_barcode(merged, barcode)
+        if merged_product is None:
+            await status.edit_text(f'❌ ШК <code>{barcode}</code> не найден ни в одном кабинете WB.', parse_mode='HTML')
+            await state.clear()
+            return
+
+        # Calculate the final merged procurement row with the selected stock mode.
+        merged_result = calculate_procurement(
+            products=merged,
+            stocks_fbs=stocks,
+            bundles=bundles,
+            analysis_days=analysis_days,
+            target_days=target_days,
+            coefficient=coefficient,
+            stock_mode=stock_mode,
+        )
+        row = _find_row_for_product(merged_result, merged_product)
+        if row is None:
+            await status.edit_text('❌ Товар найден, но он определён как комплект и не входит в закупку компонентов.')
+            await state.clear()
+            return
+
+        # Separate cabinet calculations are used only to show sales and bundle consumption per cabinet.
+        res1 = calculate_procurement(products1, {}, bundles, analysis_days, target_days, coefficient, 'fbo')
+        res2 = calculate_procurement(products2, {}, bundles, analysis_days, target_days, coefficient, 'fbo')
+        p1 = next((p for p in products1 if p.barcodes & merged_product.barcodes or (p.vendor_code and p.vendor_code == merged_product.vendor_code and p.size == merged_product.size)), None)
+        p2 = next((p for p in products2 if p.barcodes & merged_product.barcodes or (p.vendor_code and p.vendor_code == merged_product.vendor_code and p.size == merged_product.size)), None)
+        rr1 = _find_row_for_product(res1, p1)
+        rr2 = _find_row_for_product(res2, p2)
+
+        fbo1, fbs1 = (p1.fbo, p1.fbs) if p1 else (0, 0)
+        fbo2, fbs2 = (p2.fbo, p2.fbs) if p2 else (0, 0)
+        bundle1 = rr1.bundle_sales_units if rr1 else 0
+        bundle2 = rr2.bundle_sales_units if rr2 else 0
+        direct1, direct2 = fbo1 + fbs1, fbo2 + fbs2
+        total_direct = direct1 + direct2
+        total_bundle = bundle1 + bundle2
+        mode_label = {'fbo': 'только FBO', 'fbs': 'только FBS', 'both': 'FBO + FBS'}.get(stock_mode, stock_mode)
+
+        barcodes_text = ', '.join(sorted(merged_product.barcodes))
+        text = (
+            f'🔎 <b>Ручная проверка по ШК</b>\n\n'
+            f'<b>ШК:</b> <code>{barcode}</code>\n'
+            f'<b>Все ШК товара:</b> {barcodes_text}\n'
+            f'<b>Артикул продавца:</b> {html.escape(merged_product.vendor_code or "—")}\n'
+            f'<b>Бренд:</b> {html.escape(merged_product.brand or "—")}\n'
+            f'<b>Товар:</b> {html.escape(merged_product.name or "—")}\n'
+            f'<b>Размер:</b> {html.escape(merged_product.size or "0")}\n\n'
+            f'📅 <b>Период:</b> {from_d:%d.%m.%Y} — {to_d:%d.%m.%Y} ({analysis_days} дн.)\n\n'
+            f'🏢 <b>{html.escape(CABINET_1_NAME)}</b>\n'
+            f'FBO: {fbo1} | FBS: {fbs1} | напрямую: {direct1}\n'
+            f'Через наборы: {bundle1} | общий расход: {direct1 + bundle1}\n\n'
+            f'🏢 <b>{html.escape(CABINET_2_NAME)}</b>\n'
+            f'FBO: {fbo2} | FBS: {fbs2} | напрямую: {direct2}\n'
+            f'Через наборы: {bundle2} | общий расход: {direct2 + bundle2}\n\n'
+            f'📊 <b>Итого</b>\n'
+            f'Заказы товара напрямую: {total_direct}\n'
+            f'Расход через наборы: {total_bundle}\n'
+            f'<b>Общий расход: {row.total_consumption}</b>\n'
+            f'Среднее: <b>{_fmt_num(row.average_per_day)} шт./день</b>\n\n'
+            f'📦 <b>Остатки</b>\n'
+            f'FBO: {row.fbo_physical_stock} шт.\n'
+            f'FBS (WB API): {row.fbs_physical_stock} шт.\n'
+            f'Для расчёта ({mode_label}): <b>{row.physical_stock} шт.</b>\n'
+            f'Хватит примерно на: <b>{_fmt_num(row.days_remaining, 1)} дн.</b>\n\n'
+            f'🛒 <b>Закупка</b>\n'
+            f'Целевой запас: {target_days} дн.\n'
+            f'Коэффициент: {str(coefficient).replace(".", ",")}\n'
+            f'Необходимо иметь: {row.required_stock} шт.\n'
+            f'<b>К закупке: {row.purchase_qty} шт.</b>'
+        )
+        await status.edit_text(text, parse_mode='HTML')
+    except WBApiError as exc:
+        await status.edit_text(f'❌ Ошибка WB API:\n{exc}')
+    except Exception as exc:
+        await status.edit_text(f'❌ Ошибка: {type(exc).__name__}: {exc}')
+    finally:
+        await state.clear()
 
 
 async def generate_purchase(m: Message, state: FSMContext):

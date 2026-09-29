@@ -33,3 +33,5 @@ ALLOWED_TELEGRAM_IDS = _parse_telegram_ids(
 WB_CONTENT_URL = 'https://content-api.wildberries.ru'
 WB_STATISTICS_URL = 'https://statistics-api.wildberries.ru'
 WB_ANALYTICS_URL = 'https://seller-analytics-api.wildberries.ru'
+
+WB_MARKETPLACE_URL = 'https://marketplace-api.wildberries.ru'

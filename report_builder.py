@@ -20,6 +20,7 @@ class Product:
     fbo: int = 0
     fbs: int = 0
     fbo_stock: int = 0
+    fbs_stock: int = 0
 
     @property
     def total(self) -> int:
@@ -197,6 +198,7 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
             fbo=sum(g.fbo for g in group),
             fbs=sum(g.fbs for g in group),
             fbo_stock=sum(g.fbo_stock for g in group),
+            fbs_stock=sum(g.fbs_stock for g in group),
         ))
     return out
 

@@ -4,7 +4,7 @@ from typing import Any
 
 import aiohttp
 
-from config import WB_CONTENT_URL, WB_STATISTICS_URL, WB_ANALYTICS_URL
+from config import WB_CONTENT_URL, WB_STATISTICS_URL, WB_ANALYTICS_URL, WB_MARKETPLACE_URL
 
 MOSCOW = timezone(timedelta(hours=3))
 
@@ -95,6 +95,50 @@ class WBClient:
                 if len(items) < limit:
                     break
                 offset += len(items)
+        return totals
+
+
+    async def get_fbs_stocks(self, chrt_ids: list[int]) -> dict[int, int]:
+        """Return current FBS stock aggregated across all seller warehouses by chrtId.
+
+        Wildberries Marketplace API exposes seller warehouses via GET /api/v3/warehouses
+        and stock for each warehouse via POST /api/v3/stocks/{warehouseId}.
+        """
+        ids = sorted({int(x) for x in chrt_ids if x})
+        if not ids:
+            return {}
+
+        warehouses_url = f'{WB_MARKETPLACE_URL}/api/v3/warehouses'
+        warehouses = await self._request('GET', warehouses_url) or []
+        if not isinstance(warehouses, list):
+            raise WBApiError('Неожиданный формат списка складов продавца WB')
+
+        warehouse_ids: list[int] = []
+        for row in warehouses:
+            try:
+                warehouse_id = int(row.get('id') or 0)
+            except (TypeError, ValueError, AttributeError):
+                warehouse_id = 0
+            if warehouse_id:
+                warehouse_ids.append(warehouse_id)
+
+        totals: dict[int, int] = {}
+        # Keep chunks conservative. The API accepts arrays of chrtIds; 1000 also matches
+        # the maximum batch size used by adjacent stock-management methods.
+        batches = [ids[i:i + 1000] for i in range(0, len(ids), 1000)]
+        for warehouse_id in warehouse_ids:
+            url = f'{WB_MARKETPLACE_URL}/api/v3/stocks/{warehouse_id}'
+            for batch in batches:
+                data = await self._request('POST', url, json={'chrtIds': batch}) or {}
+                rows = data.get('stocks') or []
+                for row in rows:
+                    try:
+                        chrt = int(row.get('chrtId') or row.get('chrtID') or 0)
+                        qty = int(row.get('amount') or 0)
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                    if chrt:
+                        totals[chrt] = totals.get(chrt, 0) + qty
         return totals
 
     async def get_orders_legacy(self, date_from: date, date_to: date) -> list[dict]:

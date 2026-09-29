@@ -271,7 +271,8 @@ def calculate_procurement(
     fbs_direct_by_product: dict[int, int] = defaultdict(int)
     fbo_direct_by_product: dict[int, int] = defaultdict(int)
     for p in products:
-        fbs_direct_by_product[id(p)] = sum(stocks_fbs.get(bc, 0) for bc in p.barcodes)
+        file_qty = sum(stocks_fbs.get(bc, 0) for bc in p.barcodes)
+        fbs_direct_by_product[id(p)] = file_qty if stocks_fbs else int(p.fbs_stock or 0)
         fbo_direct_by_product[id(p)] = int(p.fbo_stock or 0)
 
     bundle_sales_by_product: dict[int, int] = defaultdict(int)
@@ -296,7 +297,11 @@ def calculate_procurement(
             fbo, fbs = bundle_product.fbo, bundle_product.fbs
             bundle_stock_fbo = int(bundle_product.fbo_stock or 0)
         bundle_orders = fbo + fbs
-        bundle_stock_fbs = stocks_fbs.get(bundle.barcode, 0)
+        bundle_stock_fbs = (
+            stocks_fbs.get(bundle.barcode, 0)
+            if stocks_fbs
+            else int(bundle_product.fbs_stock or 0) if bundle_product is not None else 0
+        )
         bundle_stock_selected = selected_stock(bundle_stock_fbo, bundle_stock_fbs)
 
         matched_counts: dict[int, int] = defaultdict(int)
