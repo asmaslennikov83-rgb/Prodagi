@@ -36,6 +36,10 @@ class ManualState(StatesGroup):
     barcode = State()
 
 
+class TemplateState(StatesGroup):
+    bundles_file = State()
+
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -68,6 +72,7 @@ def start_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text='📦 Рассчитать закупку', callback_data='purchase')
     kb.button(text='🔎 Ручная проверка по ШК', callback_data='manual_check')
+    kb.button(text='📦 Загрузить шаблон комплектов', callback_data='upload_bundles_template')
     kb.adjust(1)
     return kb.as_markup()
 
@@ -145,6 +150,63 @@ async def start(m: Message):
         'Учитывает заказы FBO + FBS, остатки на вашем складе и комплекты.',
         reply_markup=start_kb(),
     )
+
+
+
+
+@dp.callback_query(F.data == 'upload_bundles_template')
+async def upload_bundles_template_start(c: CallbackQuery, state: FSMContext):
+    await cleanup_state_files(state)
+    await state.clear()
+    await state.set_state(TemplateState.bundles_file)
+    current = _last_file_path(c.from_user.id, 'bundles')
+    current_text = (
+        '\n\n✅ Сейчас сохранён шаблон: <code>' + html.escape(current.name) + '</code>'
+        if current else
+        '\n\n⚠️ Сейчас сохранённого шаблона нет.'
+    )
+    await c.message.edit_text(
+        '📦 <b>Загрузка шаблона комплектов</b>\n\n'
+        'Отправьте файл <b>.xls</b> или <b>.xlsx</b>. Новый файл заменит предыдущий шаблон для вашего Telegram ID.'
+        + current_text,
+        parse_mode='HTML',
+    )
+    await c.answer()
+
+
+@dp.message(TemplateState.bundles_file)
+async def upload_bundles_template_file(m: Message, state: FSMContext):
+    bundle_path = await save_uploaded_excel(m, 'wb_bundles_manual_')
+    if not bundle_path:
+        await m.answer('❌ Отправьте шаблон комплектов в формате .xls или .xlsx.')
+        return
+    try:
+        bundles, bundle_errors = load_bundles_file(bundle_path)
+    except Exception as exc:
+        try:
+            os.remove(bundle_path)
+        except OSError:
+            pass
+        await m.answer(f'❌ Не удалось прочитать шаблон комплектов:\n{exc}')
+        return
+    if not bundles:
+        try:
+            os.remove(bundle_path)
+        except OSError:
+            pass
+        await m.answer('❌ В шаблоне не найдено ни одного комплекта.')
+        return
+    saved = _save_last_file(m.from_user.id, 'bundles', bundle_path)
+    try:
+        os.remove(bundle_path)
+    except OSError:
+        pass
+    await state.clear()
+    text = f'✅ Шаблон комплектов сохранён. Найдено комплектов: {len(bundles)}.'
+    if bundle_errors:
+        text += f'\n⚠️ Предупреждений при чтении: {len(bundle_errors)}.'
+    text += '\n\nТеперь его можно использовать в «🔎 Ручной проверке по ШК» без полноценного отчёта.'
+    await m.answer(text, reply_markup=start_kb())
 
 
 @dp.callback_query(F.data == 'manual_check')
@@ -398,7 +460,7 @@ async def generate_manual_check(m: Message, state: FSMContext, user_id: int):
     if bundle_path is None:
         await m.answer(
             '❌ Нет сохранённого шаблона комплектов.\n\n'
-            'Сначала один раз выполните обычный расчёт закупки и загрузите шаблон комплектов.'
+            'На главном экране нажмите «📦 Загрузить шаблон комплектов», загрузите файл и повторите проверку.'
         )
         await state.clear()
         return
