@@ -6,6 +6,8 @@ from typing import Iterable
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
+from config import EXCLUDED_BARCODES
+
 
 @dataclass
 class Product:
@@ -46,7 +48,7 @@ def build_products(cards: list[dict], cabinet: str) -> list[Product]:
         for size in sizes:
             chrt_id = int(size.get('chrtID') or 0)
             tech_size = s(size.get('techSize') or size.get('wbSize')) or '0'
-            barcodes = {s(x) for x in (size.get('skus') or []) if s(x)}
+            barcodes = {s(x) for x in (size.get('skus') or []) if s(x)} - EXCLUDED_BARCODES
             products.append(Product(cabinet, nm_id, chrt_id, vendor, brand, name, tech_size, barcodes))
     return products
 
@@ -72,7 +74,7 @@ def apply_orders(products: list[Product], orders: list[dict], source: str) -> in
     by_chrt: dict[int, Product] = {}
     by_nm: dict[int, list[Product]] = defaultdict(list)
     for p in products:
-        for bc in p.barcodes:
+        for bc in p.barcodes - EXCLUDED_BARCODES:
             by_barcode[bc] = p
         if p.chrt_id:
             by_chrt[p.chrt_id] = p
@@ -152,7 +154,7 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
     dsu = DSU(len(items))
     barcode_owner: dict[str, int] = {}
     for i, p in enumerate(items):
-        for bc in p.barcodes:
+        for bc in p.barcodes - EXCLUDED_BARCODES:
             if bc in barcode_owner:
                 j = barcode_owner[bc]
                 if items[j].cabinet != p.cabinet:
@@ -194,7 +196,7 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
             brand=brand,
             name=name,
             size=size or '0',
-            barcodes=set().union(*(g.barcodes for g in group)),
+            barcodes=set().union(*(g.barcodes for g in group)) - EXCLUDED_BARCODES,
             fbo=sum(g.fbo for g in group),
             fbs=sum(g.fbs for g in group),
             fbo_stock=sum(g.fbo_stock for g in group),

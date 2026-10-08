@@ -17,7 +17,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import (
     TELEGRAM_BOT_TOKEN, WB_API_KEY_1, WB_API_KEY_2,
-    CABINET_1_NAME, CABINET_2_NAME, ALLOWED_TELEGRAM_IDS,
+    CABINET_1_NAME, CABINET_2_NAME, ALLOWED_TELEGRAM_IDS, EXCLUDED_BARCODES,
 )
 from procurement import (
     calculate_procurement, load_bundles_file, load_stock_file, make_procurement_excel,
@@ -454,6 +454,10 @@ def _fmt_num(value: float, digits: int = 2) -> str:
 async def generate_manual_check(m: Message, state: FSMContext, user_id: int):
     data = await state.get_data()
     barcode = data.get('manual_barcode', '')
+    if barcode in EXCLUDED_BARCODES:
+        await m.answer('Этот ШК исключён из сопоставления. Введите другой ШК товара.')
+        await state.clear()
+        return
     stock_mode = data.get('stock_mode', 'fbs')
     bundle_path = _last_file_path(user_id, 'bundles')
 

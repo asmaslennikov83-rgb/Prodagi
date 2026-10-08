@@ -9,6 +9,12 @@ WB_API_KEY_2 = os.getenv('WB_API_KEY_2', '').strip()
 CABINET_1_NAME = os.getenv('CABINET_1_NAME', 'Кабинет 1').strip() or 'Кабинет 1'
 CABINET_2_NAME = os.getenv('CABINET_2_NAME', 'Кабинет 2').strip() or 'Кабинет 2'
 
+EXCLUDED_BARCODES = frozenset(
+    barcode.strip()
+    for barcode in os.getenv('EXCLUDED_BARCODES', '4600987014272').replace(';', ',').split(',')
+    if barcode.strip()
+)
+
 
 def _parse_telegram_ids(raw: str) -> set[int]:
     ids: set[int] = set()
