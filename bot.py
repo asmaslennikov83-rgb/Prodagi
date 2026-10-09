@@ -452,6 +452,14 @@ def _fmt_num(value: float, digits: int = 2) -> str:
 
 
 async def generate_manual_check(m: Message, state: FSMContext, user_id: int):
+    try:
+        await _generate_manual_check(m, state, user_id)
+    finally:
+        await state.clear()
+        await m.answer('Главное меню — выберите действие:', reply_markup=start_kb())
+
+
+async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
     data = await state.get_data()
     barcode = data.get('manual_barcode', '')
     if barcode in EXCLUDED_BARCODES:
