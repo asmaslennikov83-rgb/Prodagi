@@ -556,6 +556,11 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
         mode_label = {'fbo': 'только FBO', 'fbs': 'только FBS', 'both': 'FBO + FBS'}.get(stock_mode, stock_mode)
 
         barcodes_text = ', '.join(sorted(merged_product.barcodes))
+        cabinet_details = '\n'.join(
+            f'{html.escape(cabinet)}: FBO {row.cabinet_fbo.get(cabinet, 0)} шт. | '
+            f'целевой запас {row.cabinet_required.get(cabinet, 0)} шт. | потребность {need} шт.'
+            for cabinet, need in row.cabinet_needs.items()
+        )
         text = (
             f'🔎 <b>Ручная проверка по ШК</b>\n\n'
             f'<b>ШК:</b> <code>{barcode}</code>\n'
@@ -578,10 +583,12 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
             f'Среднее: <b>{_fmt_num(row.average_per_day)} шт./день</b>\n\n'
             f'📦 <b>Остатки</b>\n'
             f'FBO: {row.fbo_physical_stock} шт.\n'
-            f'FBS (WB API): {row.fbs_physical_stock} шт.\n'
+            f'FBS общий (WB API, максимум по кабинетам): {row.fbs_physical_stock} шт.\n'
             f'Для расчёта ({mode_label}): <b>{row.physical_stock} шт.</b>\n'
             f'Хватит примерно на: <b>{_fmt_num(row.days_remaining, 1)} дн.</b>\n\n'
             f'🛒 <b>Закупка</b>\n'
+            f'{cabinet_details}\n'
+            f'Потребность общая до FBS: {row.total_need} шт.\n'
             f'Целевой запас: {target_days} дн.\n'
             f'Коэффициент: {str(coefficient).replace(".", ",")}\n'
             f'Необходимо иметь: {row.required_stock} шт.\n'

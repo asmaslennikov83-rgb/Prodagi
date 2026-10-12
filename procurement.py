@@ -4,7 +4,7 @@ import math
 import re
 from decimal import Decimal, ROUND_CEILING
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +35,10 @@ class PurchaseRow:
     required_stock: int = 0
     purchase_qty: int = 0
     note: str = ''
+    cabinet_fbo: dict[str, int] = field(default_factory=dict)
+    cabinet_required: dict[str, int] = field(default_factory=dict)
+    cabinet_needs: dict[str, int] = field(default_factory=dict)
+    total_need: int = 0
 
     @property
     def total_consumption(self) -> int:
@@ -377,6 +381,34 @@ def calculate_procurement(
             errors.append(('Остатки', bc, f'Баркод из файла остатков не найден в WB/шаблоне комплектов. Остаток: {qty}.'))
 
     rows.sort(key=lambda r: (-r.purchase_qty, r.product.name.casefold(), r.product.size.casefold()))
+    if any(product.cabinet_products for product in products):
+        separate: dict[str, list[Product]] = defaultdict(list)
+        for product in products:
+            for member in product.cabinet_products or [product]:
+                separate[member.cabinet].append(replace(member, barcodes=set(product.barcodes), cabinet_products=[]))
+        for cabinet, members in separate.items():
+            cabinet_result = calculate_procurement(members, {}, bundles, analysis_days, target_days, coefficient, 'fbo')
+            for row in rows:
+                member_ids = {(member.nm_id, member.chrt_id) for member in row.product.cabinet_products or [row.product] if member.cabinet == cabinet}
+                matches = [candidate for candidate in cabinet_result.rows if (candidate.product.nm_id, candidate.product.chrt_id) in member_ids]
+                row.cabinet_fbo[cabinet] = sum(candidate.fbo_physical_stock for candidate in matches)
+                row.cabinet_required[cabinet] = sum(candidate.required_stock for candidate in matches)
+                row.cabinet_needs[cabinet] = sum(
+                    max(0, candidate.required_stock - (candidate.fbo_physical_stock if stock_mode in {'fbo', 'both'} else 0))
+                    for candidate in matches
+                )
+        for row in rows:
+            row.required_stock = sum(row.cabinet_required.values())
+            row.total_need = sum(row.cabinet_needs.values())
+            row.purchase_qty = max(0, row.total_need - (row.fbs_physical_stock if stock_mode in {'fbs', 'both'} else 0))
+    else:
+        for row in rows:
+            cabinet = row.product.cabinet
+            row.cabinet_fbo[cabinet] = row.fbo_physical_stock
+            row.cabinet_required[cabinet] = row.required_stock
+            row.total_need = max(0, row.required_stock - (row.fbo_physical_stock if stock_mode in {'fbo', 'both'} else 0))
+            row.cabinet_needs[cabinet] = row.total_need
+    rows.sort(key=lambda r: (-r.purchase_qty, r.product.name.casefold(), r.product.size.casefold()))
     bundle_rows.sort(key=lambda r: (r.bundle_name.casefold(), r.component_name.casefold()))
     return ProcurementResult(rows=rows, bundle_rows=bundle_rows, errors=errors)
 
@@ -402,14 +434,16 @@ def make_procurement_excel(
     red = 'FCE4D6'
     thin = Side(style='thin', color='D9E2F3')
 
-    ws.merge_cells('A1:S1')
+    cabinets = list(dict.fromkeys(cabinet for row in result.rows for cabinet in row.cabinet_needs))
+    last_column = get_column_letter(20 + 3 * len(cabinets))
+    ws.merge_cells(f'A1:{last_column}1')
     ws['A1'] = 'Расчёт закупки Wildberries'
     ws['A1'].font = Font(bold=True, size=16, color='FFFFFF')
     ws['A1'].fill = PatternFill('solid', fgColor=navy)
     ws['A1'].alignment = Alignment(horizontal='center')
-    ws.merge_cells('A2:S2')
+    ws.merge_cells(f'A2:{last_column}2')
     ws['A2'] = f'Кабинет: {cabinet_name} | Период продаж: {period_text} ({analysis_days} дн.)'
-    ws.merge_cells('A3:S3')
+    ws.merge_cells(f'A3:{last_column}3')
     mode_label = {'fbo': 'Только FBO', 'fbs': 'Только FBS', 'both': 'FBO + FBS'}.get(stock_mode, stock_mode)
     ws['A3'] = f'Целевой запас: {target_days} дн. | Коэффициент: {coefficient:g} | Учитываемые остатки: {mode_label}'
 
@@ -418,6 +452,8 @@ def make_procurement_excel(
         'Размер', 'Заказы FBO', 'Заказы FBS', 'Продажи комплектами', 'Общий расход', 'Среднее/день',
         'Запас, дней', 'Коэффициент', 'Необходимо иметь', 'Остаток FBO', 'Остаток FBS', 'Остаток учтён', 'Примечание'
     ]
+    headers += [label for cabinet in cabinets for label in (f'Остаток FBO — {cabinet}', f'Целевой запас — {cabinet}', f'Потребность — {cabinet}')]
+    headers += ['Потребность общая до FBS']
     header_row = 5
     for col, value in enumerate(headers, 1):
         c = ws.cell(header_row, col, value)
@@ -432,6 +468,8 @@ def make_procurement_excel(
             r.bundle_sales_units, r.total_consumption, r.average_per_day, target_days, coefficient,
             r.required_stock, r.fbo_physical_stock, r.fbs_physical_stock, r.physical_stock, r.note,
         ]
+        values += [value for cabinet in cabinets for value in (r.cabinet_fbo.get(cabinet, 0), r.cabinet_required.get(cabinet, 0), r.cabinet_needs.get(cabinet, 0))]
+        values += [r.total_need]
         for c_idx, value in enumerate(values, 1):
             cell = ws.cell(r_idx, c_idx, value)
             cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -446,11 +484,12 @@ def make_procurement_excel(
             ws.cell(r_idx, 19).fill = PatternFill('solid', fgColor=yellow)
 
     widths = [32, 24, 20, 48, 14, 20, 12, 13, 13, 20, 14, 14, 12, 13, 18, 14, 14, 16, 26]
+    widths += [24] * (3 * len(cabinets) + 1)
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = 'A6'
     if result.rows:
-        ws.auto_filter.ref = f'A5:S{header_row + len(result.rows)}'
+        ws.auto_filter.ref = f'A5:{last_column}{header_row + len(result.rows)}'
     ws.row_dimensions[1].height = 24
     ws.row_dimensions[5].height = 36
 

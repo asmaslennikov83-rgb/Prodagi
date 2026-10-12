@@ -23,6 +23,7 @@ class Product:
     fbs: int = 0
     fbo_stock: int = 0
     fbs_stock: int = 0
+    cabinet_products: list['Product'] = field(default_factory=list, repr=False)
 
     @property
     def total(self) -> int:
@@ -200,7 +201,8 @@ def merge_products(cab1: list[Product], cab2: list[Product]) -> list[Product]:
             fbo=sum(g.fbo for g in group),
             fbs=sum(g.fbs for g in group),
             fbo_stock=sum(g.fbo_stock for g in group),
-            fbs_stock=sum(g.fbs_stock for g in group),
+            fbs_stock=max(sum(g.fbs_stock for g in group if g.cabinet == cabinet) for cabinet in {g.cabinet for g in group}),
+            cabinet_products=[member for product in group for member in (product.cabinet_products or [product])],
         ))
     return out
 
