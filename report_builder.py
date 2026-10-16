@@ -1,6 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from openpyxl import Workbook
@@ -24,6 +25,9 @@ class Product:
     fbo_stock: int = 0
     fbs_stock: int = 0
     cabinet_products: list['Product'] = field(default_factory=list, repr=False)
+    availability_dates: set[str] | None = None
+    order_dates: set[str] = field(default_factory=set)
+    history_warning: str = ''
 
     @property
     def total(self) -> int:
@@ -126,6 +130,15 @@ def apply_orders(products: list[Product], orders: list[dict], source: str) -> in
             p.vendor_code = s(o.get('supplierArticle') or o.get('vendorCode') or o.get('vendor_code'))
 
         model = order_model(o, source)
+        timestamp = s(o.get('date') if source == 'orders-api' else o.get('createdAt'))
+        if timestamp:
+            try:
+                ordered_at = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                if ordered_at.tzinfo is not None:
+                    ordered_at = ordered_at.astimezone(timezone(timedelta(hours=3)))
+                p.order_dates.add(ordered_at.date().isoformat())
+            except ValueError:
+                pass
         if model == 'FBS':
             p.fbs += 1
         elif model == 'FBO':

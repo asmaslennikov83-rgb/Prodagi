@@ -39,6 +39,8 @@ class PurchaseRow:
     cabinet_required: dict[str, int] = field(default_factory=dict)
     cabinet_needs: dict[str, int] = field(default_factory=dict)
     total_need: int = 0
+    cabinet_days: dict[str, int | None] = field(default_factory=dict)
+    cabinet_average: dict[str, float] = field(default_factory=dict)
 
     @property
     def total_consumption(self) -> int:
@@ -88,6 +90,7 @@ class ProcurementResult:
     rows: list[PurchaseRow]
     bundle_rows: list[BundleAuditRow]
     errors: list[tuple[str, str, str]] = field(default_factory=list)
+    source_products: list[Product] = field(default_factory=list)
 
 
 def _norm_header(value) -> str:
@@ -280,9 +283,16 @@ def calculate_procurement(
         fbo_direct_by_product[id(p)] = int(p.fbo_stock or 0)
 
     bundle_sales_by_product: dict[int, int] = defaultdict(int)
+    bundle_rate_by_product: dict[int, Decimal] = defaultdict(Decimal)
     fbs_stock_in_bundles_by_product: dict[int, int] = defaultdict(int)
     fbo_stock_in_bundles_by_product: dict[int, int] = defaultdict(int)
     bundle_rows: list[BundleAuditRow] = []
+
+    def rate(product):
+        days = len(product.availability_dates) if product.availability_dates is not None else analysis_days
+        if days == 0 and product.total > 0:
+            days = analysis_days
+        return Decimal(product.total) / Decimal(days) if days > 0 else Decimal(0)
 
     def selected_stock(fbo: int, fbs: int) -> int:
         if stock_mode == 'fbo':
@@ -346,6 +356,8 @@ def calculate_procurement(
             stock_use_fbs = bundle_stock_fbs * mult
             stock_use_selected = bundle_stock_selected * mult
             bundle_sales_by_product[pid] += sales_use
+            if bundle_product is not None:
+                bundle_rate_by_product[pid] += rate(bundle_product) * mult
             fbo_stock_in_bundles_by_product[pid] += stock_use_fbo
             fbs_stock_in_bundles_by_product[pid] += stock_use_fbs
             bundle_rows.append(BundleAuditRow(
@@ -367,12 +379,23 @@ def calculate_procurement(
         row.fbs_stock_inside_bundles = fbs_stock_in_bundles_by_product[id(p)]
         row.selected_stock = selected_stock(row.fbo_physical_stock, row.fbs_physical_stock)
         total = row.total_consumption
-        row.average_per_day = total / analysis_days if analysis_days > 0 else 0.0
-        raw_required = (Decimal(total) / Decimal(analysis_days) * Decimal(target_days) * Decimal(str(coefficient))) if analysis_days > 0 else Decimal(0)
+        daily_rate = rate(p) + bundle_rate_by_product[id(p)]
+        row.average_per_day = float(daily_rate)
+        raw_required = daily_rate * Decimal(target_days) * Decimal(str(coefficient))
         row.required_stock = int(raw_required.to_integral_value(rounding=ROUND_CEILING))
         row.purchase_qty = max(0, row.required_stock - row.physical_stock)
-        if stock_mode in {'fbs', 'both'} and not any(bc in stocks_fbs for bc in p.barcodes) and row.fbs_stock_inside_bundles == 0:
+        if stocks_fbs and stock_mode in {'fbs', 'both'} and not any(bc in stocks_fbs for bc in p.barcodes) and row.fbs_stock_inside_bundles == 0:
             row.note = 'Нет в файле остатков FBS'
+        if p.history_warning:
+            row.note = '; '.join(filter(None, (row.note, p.history_warning)))
+        if p.availability_dates is not None and not p.availability_dates and p.total > 0:
+            row.note = '; '.join(filter(None, (row.note, 'Нет подтверждённых дней наличия при заказах: расчёт по календарным дням.')))
+        row.cabinet_days[p.cabinet] = len(p.availability_dates) if p.availability_dates is not None else None
+        for bundle in bundles:
+            if any(by_barcode.get(barcode) is p for barcode in bundle.components):
+                bundle_product = by_barcode.get(bundle.barcode)
+                if bundle_product is not None and bundle_product.history_warning:
+                    row.note = '; '.join(filter(None, (row.note, f'Комплект {bundle.barcode}: {bundle_product.history_warning}')))
         rows.append(row)
 
     known_barcodes = set(by_barcode) | bundle_barcodes
@@ -380,7 +403,6 @@ def calculate_procurement(
         if bc not in known_barcodes:
             errors.append(('Остатки', bc, f'Баркод из файла остатков не найден в WB/шаблоне комплектов. Остаток: {qty}.'))
 
-    rows.sort(key=lambda r: (-r.purchase_qty, r.product.name.casefold(), r.product.size.casefold()))
     if any(product.cabinet_products for product in products):
         separate: dict[str, list[Product]] = defaultdict(list)
         for product in products:
@@ -397,7 +419,13 @@ def calculate_procurement(
                     max(0, candidate.required_stock - (candidate.fbo_physical_stock if stock_mode in {'fbo', 'both'} else 0))
                     for candidate in matches
                 )
+                row.cabinet_average[cabinet] = sum(candidate.average_per_day for candidate in matches)
+                days = [candidate.cabinet_days.get(cabinet) for candidate in matches]
+                row.cabinet_days[cabinet] = days[0] if len(days) == 1 else None
+                notes = [row.note] + [f'{cabinet}: {candidate.note}' for candidate in matches if candidate.note]
+                row.note = '; '.join(dict.fromkeys(note for note in notes if note))
         for row in rows:
+            row.average_per_day = sum(row.cabinet_average.values())
             row.required_stock = sum(row.cabinet_required.values())
             row.total_need = sum(row.cabinet_needs.values())
             row.purchase_qty = max(0, row.total_need - (row.fbs_physical_stock if stock_mode in {'fbs', 'both'} else 0))
@@ -405,12 +433,17 @@ def calculate_procurement(
         for row in rows:
             cabinet = row.product.cabinet
             row.cabinet_fbo[cabinet] = row.fbo_physical_stock
+            row.cabinet_average[cabinet] = row.average_per_day
             row.cabinet_required[cabinet] = row.required_stock
             row.total_need = max(0, row.required_stock - (row.fbo_physical_stock if stock_mode in {'fbo', 'both'} else 0))
             row.cabinet_needs[cabinet] = row.total_need
     rows.sort(key=lambda r: (-r.purchase_qty, r.product.name.casefold(), r.product.size.casefold()))
     bundle_rows.sort(key=lambda r: (r.bundle_name.casefold(), r.component_name.casefold()))
-    return ProcurementResult(rows=rows, bundle_rows=bundle_rows, errors=errors)
+    for product in products:
+        for member in product.cabinet_products or [product]:
+            if member.history_warning:
+                errors.append(('История наличия', ', '.join(sorted(member.barcodes)), f'{member.cabinet}: {member.history_warning}'))
+    return ProcurementResult(rows=rows, bundle_rows=bundle_rows, errors=errors, source_products=[member for product in products for member in product.cabinet_products or [product]])
 
 
 def make_procurement_excel(
@@ -435,7 +468,7 @@ def make_procurement_excel(
     thin = Side(style='thin', color='D9E2F3')
 
     cabinets = list(dict.fromkeys(cabinet for row in result.rows for cabinet in row.cabinet_needs))
-    last_column = get_column_letter(20 + 3 * len(cabinets))
+    last_column = get_column_letter(20 + 5 * len(cabinets))
     ws.merge_cells(f'A1:{last_column}1')
     ws['A1'] = 'Расчёт закупки Wildberries'
     ws['A1'].font = Font(bold=True, size=16, color='FFFFFF')
@@ -452,7 +485,7 @@ def make_procurement_excel(
         'Размер', 'Заказы FBO', 'Заказы FBS', 'Продажи комплектами', 'Общий расход', 'Среднее/день',
         'Запас, дней', 'Коэффициент', 'Необходимо иметь', 'Остаток FBO', 'Остаток FBS', 'Остаток учтён', 'Примечание'
     ]
-    headers += [label for cabinet in cabinets for label in (f'Остаток FBO — {cabinet}', f'Целевой запас — {cabinet}', f'Потребность — {cabinet}')]
+    headers += [label for cabinet in cabinets for label in (f'Остаток FBO — {cabinet}', f'Целевой запас — {cabinet}', f'Потребность — {cabinet}', f'Дней наличия — {cabinet}', f'Среднее/день — {cabinet}')]
     headers += ['Потребность общая до FBS']
     header_row = 5
     for col, value in enumerate(headers, 1):
@@ -468,7 +501,7 @@ def make_procurement_excel(
             r.bundle_sales_units, r.total_consumption, r.average_per_day, target_days, coefficient,
             r.required_stock, r.fbo_physical_stock, r.fbs_physical_stock, r.physical_stock, r.note,
         ]
-        values += [value for cabinet in cabinets for value in (r.cabinet_fbo.get(cabinet, 0), r.cabinet_required.get(cabinet, 0), r.cabinet_needs.get(cabinet, 0))]
+        values += [value for cabinet in cabinets for value in (r.cabinet_fbo.get(cabinet, 0), r.cabinet_required.get(cabinet, 0), r.cabinet_needs.get(cabinet, 0), r.cabinet_days.get(cabinet) if r.cabinet_days.get(cabinet) is not None else 'Нет полной истории', r.cabinet_average.get(cabinet, 0))]
         values += [r.total_need]
         for c_idx, value in enumerate(values, 1):
             cell = ws.cell(r_idx, c_idx, value)
@@ -484,7 +517,7 @@ def make_procurement_excel(
             ws.cell(r_idx, 19).fill = PatternFill('solid', fgColor=yellow)
 
     widths = [32, 24, 20, 48, 14, 20, 12, 13, 13, 20, 14, 14, 12, 13, 18, 14, 14, 16, 26]
-    widths += [24] * (3 * len(cabinets) + 1)
+    widths += [24] * (5 * len(cabinets) + 1)
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = width
     ws.freeze_panes = 'A6'
@@ -545,5 +578,26 @@ def make_procurement_excel(
     es.column_dimensions['B'].width = 24
     es.column_dimensions['C'].width = 90
     es.freeze_panes = 'A2'
+
+    availability_sheet = wb.create_sheet('Наличие')
+    availability_sheet.append(['Кабинет', 'Артикул WB', 'ID размера', 'Баркод(ы)', 'Наименование', 'Размер', 'Заказы напрямую', 'Дней анализа', 'Дней наличия напрямую', 'Среднее прямых заказов/день', 'Основание расчёта'])
+    for cell in availability_sheet[1]:
+        cell.fill = PatternFill('solid', fgColor=navy)
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical='center')
+    for product in result.source_products:
+        active_days = len(product.availability_dates) if product.availability_dates is not None else None
+        denominator = active_days if active_days is not None else analysis_days
+        if denominator == 0 and product.total > 0:
+            denominator = analysis_days
+        average = product.total / denominator if denominator > 0 else 0
+        basis = product.history_warning or ('История остатков на конец дня + дни заказов' if active_days is not None else 'Календарные дни: нет полной истории')
+        availability_sheet.append([product.cabinet, product.nm_id, product.chrt_id, ', '.join(sorted(product.barcodes)), product.name, product.size, product.total, analysis_days, active_days, average, basis])
+        availability_sheet.cell(availability_sheet.max_row, 10).number_format = '0.00'
+    for index, width in enumerate([24, 18, 18, 36, 48, 14, 18, 16, 24, 24, 90], 1):
+        availability_sheet.column_dimensions[get_column_letter(index)].width = width
+    availability_sheet.freeze_panes = 'A2'
+    availability_sheet.auto_filter.ref = availability_sheet.dimensions
+    availability_sheet.row_dimensions[1].height = 36
 
     wb.save(path)

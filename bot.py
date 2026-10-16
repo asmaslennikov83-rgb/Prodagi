@@ -1,5 +1,6 @@
 import asyncio
 import html
+import hashlib
 import os
 import re
 import shutil
@@ -8,7 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -23,7 +24,27 @@ from procurement import (
     calculate_procurement, load_bundles_file, load_stock_file, make_procurement_excel,
 )
 from report_builder import apply_orders, build_products, merge_products
-from wb_client import WBApiError, WBClient
+from wb_client import MOSCOW, WBApiError, WBClient
+from stock_history import apply_stock_history
+
+HISTORY_LOCKS = {}
+
+
+async def load_cabinet_history(client, products, from_d, to_d):
+    cache_key = hashlib.sha256(f'{client.token}:{from_d}:{to_d}'.encode()).hexdigest()
+    lock = HISTORY_LOCKS.setdefault(cache_key, asyncio.Lock())
+    cache_dir = DATA_DIR / 'stock_history'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f'{cache_key}.zip'
+    async with lock:
+        if cache_file.exists() and datetime.now().timestamp() - cache_file.stat().st_mtime < 7200:
+            payload = cache_file.read_bytes()
+        else:
+            payload = await client.get_daily_stock_history(from_d, to_d)
+            temporary = cache_file.with_suffix('.tmp')
+            temporary.write_bytes(payload)
+            temporary.replace(cache_file)
+    apply_stock_history(products, payload, from_d, to_d)
 
 
 class PurchaseState(StatesGroup):
@@ -150,6 +171,42 @@ async def start(m: Message):
         'Учитывает заказы FBO + FBS, остатки на вашем складе и комплекты.',
         reply_markup=start_kb(),
     )
+
+
+@dp.message(Command('stock_history'))
+async def stock_history(m: Message):
+    argument = (m.text or '').split(maxsplit=1)
+    try:
+        days = int(argument[1]) if len(argument) > 1 else 14
+        if not 1 <= days <= 90:
+            raise ValueError
+    except ValueError:
+        await m.answer('Укажите период от 1 до 90 дней: /stock_history 14')
+        return
+    date_to = datetime.now(MOSCOW).date() - timedelta(days=1)
+    date_from = date_to - timedelta(days=days - 1)
+    status = await m.answer(
+        f'⏳ Запрашиваю историю остатков за {date_from:%d.%m.%Y} — {date_to:%d.%m.%Y} '
+        'по двум кабинетам. Подготовка может занять несколько минут. '
+        'Повторно отправлять команду пока не нужно.'
+    )
+    with tempfile.TemporaryDirectory(prefix='wb_history_') as directory:
+        for number, token, cabinet in ((1, WB_API_KEY_1, CABINET_1_NAME), (2, WB_API_KEY_2, CABINET_2_NAME)):
+            try:
+                if not token:
+                    raise WBApiError('Не настроен токен кабинета.')
+                payload = await WBClient(token).get_daily_stock_history(date_from, date_to)
+                path = Path(directory) / f'WB_stock_history_{number}_{date_from}_{date_to}.zip'
+                path.write_bytes(payload)
+                await m.answer_document(
+                    FSInputFile(path),
+                    caption=f'{cabinet}: история остатков WB на конец каждого дня. '
+                    'Это исходный отчёт для проверки данных. В расчёте закупки история загружается автоматически.',
+                )
+            except Exception as exc:
+                await m.answer(f'❌ {cabinet}: не удалось получить историю остатков. {exc}', parse_mode=None)
+    await status.edit_text('Запрос истории остатков завершён.')
+    await m.answer('Главное меню — выберите действие:', reply_markup=start_kb())
 
 
 
@@ -421,6 +478,11 @@ async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, 
     cards, (orders, source) = await asyncio.gather(cards_task, orders_task)
     products = build_products(cards, cabinet_name)
     unmatched = apply_orders(products, orders, source)
+    try:
+        await load_cabinet_history(client, products, from_d, to_d)
+    except Exception as exc:
+        for product in products:
+            product.history_warning = f'История наличия недоступна, расчёт по календарным дням: {exc}'
     if need_fbo_stock:
         nm_ids = [p.nm_id for p in products if p.nm_id]
         fbo_by_chrt = await client.get_fbo_stocks(nm_ids)
@@ -558,7 +620,8 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
         barcodes_text = ', '.join(sorted(merged_product.barcodes))
         cabinet_details = '\n'.join(
             f'{html.escape(cabinet)}: FBO {row.cabinet_fbo.get(cabinet, 0)} шт. | '
-            f'целевой запас {row.cabinet_required.get(cabinet, 0)} шт. | потребность {need} шт.'
+            f'целевой запас {row.cabinet_required.get(cabinet, 0)} шт. | потребность {need} шт. | '
+            f'дней наличия: {row.cabinet_days.get(cabinet) if row.cabinet_days.get(cabinet) is not None else "нет полной истории"}'
             for cabinet, need in row.cabinet_needs.items()
         )
         text = (
@@ -594,6 +657,8 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
             f'Необходимо иметь: {row.required_stock} шт.\n'
             f'<b>К закупке: {row.purchase_qty} шт.</b>'
         )
+        if row.note:
+            text += f'\n\n⚠️ {html.escape(row.note[:800])}'
         await status.edit_text(text, parse_mode='HTML')
     except WBApiError as exc:
         await status.edit_text(f'❌ Ошибка WB API:\n{exc}')
@@ -605,7 +670,7 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
 
 async def generate_purchase(m: Message, state: FSMContext):
     data = await state.get_data()
-    status = await m.answer('⏳ Получаю заказы FBO/FBS и рассчитываю закупку…')
+    status = await m.answer('⏳ Получаю заказы, историю наличия и текущие остатки FBO/FBS. Формирование истории WB может занять несколько минут…')
     output_path = None
     try:
         from_d = date.fromisoformat(data['from_d'])
@@ -678,6 +743,9 @@ async def generate_purchase(m: Message, state: FSMContext):
         )
         if 'order-feed' in sources:
             caption += '\n⚠️ Для части данных использован резервный Order Feed.'
+        history_errors = sum(1 for source, _, _ in result.errors if source == 'История наличия')
+        if history_errors:
+            caption += f'\n⚠️ Без полной истории наличия: {history_errors} товаров/размеров. Для них использованы календарные дни; подробности в Excel.'
         await m.answer_document(FSInputFile(output_path, filename=filename), caption=caption)
         try:
             await status.delete()

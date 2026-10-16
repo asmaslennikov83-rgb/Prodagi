@@ -1,4 +1,7 @@
 import asyncio
+import io
+import zipfile
+from uuid import uuid4
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -22,7 +25,7 @@ class WBClient:
         self.token = token
         self.headers = {'Authorization': token, 'Content-Type': 'application/json'}
 
-    async def _request(self, method: str, url: str, *, json=None, params=None, retries: int = 5):
+    async def _request(self, method: str, url: str, *, json=None, params=None, retries: int = 5, binary: bool = False):
         timeout = aiohttp.ClientTimeout(total=180)
         async with aiohttp.ClientSession(headers=self.headers, timeout=timeout) as session:
             for attempt in range(retries):
@@ -34,6 +37,13 @@ class WBClient:
                         delay = int(retry_after) if retry_after and retry_after.isdigit() else min(60, 5 * (attempt + 1))
                         await asyncio.sleep(delay)
                         continue
+                    if binary and r.status == 200:
+                        payload = bytearray()
+                        async for chunk in r.content.iter_chunked(65536):
+                            payload.extend(chunk)
+                            if len(payload) > 50 * 1024 * 1024:
+                                raise WBApiError('Отчёт WB превышает лимит загрузки 50 МБ.')
+                        return bytes(payload)
                     text = await r.text()
                     if r.status in (404, 410) and '/api/v1/supplier/orders' in url:
                         raise LegacyOrdersUnavailable(f'Старый Orders API недоступен ({r.status}).')
@@ -46,6 +56,43 @@ class WBClient:
                     except Exception as e:
                         raise WBApiError(f'WB API вернул не-JSON: {text[:800]}') from e
         raise WBApiError('WB API: превышено число повторных попыток')
+
+    async def get_daily_stock_history(self, date_from: date, date_to: date) -> bytes:
+        today = datetime.now(MOSCOW).date()
+        month_index = today.year * 12 + today.month - 1 - 3
+        oldest = date(month_index // 12, month_index % 12 + 1, 1)
+        from calendar import monthrange
+        oldest = oldest.replace(day=min(today.day, monthrange(oldest.year, oldest.month)[1]))
+        if not oldest <= date_from <= date_to < today:
+            raise WBApiError('История остатков доступна за последние 3 месяца, только за завершённые дни.')
+        report_id = str(uuid4())
+        url = f'{WB_ANALYTICS_URL}/api/v2/nm-report/downloads'
+        await self._request('POST', url, retries=1, json={
+            'id': report_id,
+            'reportType': 'STOCK_HISTORY_DAILY_CSV',
+            'userReportName': f'Остатки {date_from} — {date_to}',
+            'params': {
+                'currentPeriod': {'start': date_from.isoformat(), 'end': date_to.isoformat()},
+                'stockType': '',
+                'skipDeletedNm': False,
+            },
+        })
+        for attempt in range(15):
+            await asyncio.sleep(20)
+            response = await self._request('GET', url, params={'filter[downloadIds]': report_id}) or {}
+            reports = response.get('data') or []
+            if not isinstance(reports, list):
+                raise WBApiError('Неожиданный формат списка отчётов истории остатков.')
+            report = next((item for item in reports if item.get('id') == report_id), {})
+            status = report.get('status')
+            if status == 'FAILED':
+                raise WBApiError(f'WB не смог сформировать историю остатков. ID отчёта: {report_id}')
+            if status == 'SUCCESS':
+                payload = await self._request('GET', f'{url}/file/{report_id}', binary=True)
+                if not payload or not zipfile.is_zipfile(io.BytesIO(payload)):
+                    raise WBApiError('WB вернул некорректный ZIP с историей остатков.')
+                return payload
+        raise WBApiError(f'История остатков ещё не готова. ID отчёта: {report_id}. Повторная команда создаст новый отчёт.')
 
     async def get_all_cards(self) -> list[dict]:
         url = f'{WB_CONTENT_URL}/content/v2/get/cards/list'
