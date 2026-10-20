@@ -7,6 +7,12 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 
+class StockHistory(defaultdict):
+    def __init__(self):
+        super().__init__(lambda: defaultdict(int))
+        self.issues = defaultdict(list)
+
+
 def normalize(value):
     return re.sub(r'[^a-zа-я0-9]', '', str(value).strip().casefold().replace('ё', 'е'))
 
@@ -22,7 +28,7 @@ def parse_day(value):
 
 
 def read_stock_history(payload, date_from, date_to):
-    totals = defaultdict(lambda: defaultdict(int))
+    totals = StockHistory()
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         files = [entry for entry in archive.infolist() if entry.filename.casefold().endswith('.csv')]
         if not files or sum(entry.file_size for entry in files) > 200 * 1024 * 1024:
@@ -59,15 +65,23 @@ def read_stock_history(payload, date_from, date_to):
                 entries = [(parse_day(row.get(day_column)), row.get(quantity_column))] if day_column and quantity_column else [(day, row.get(header)) for header, day in date_columns.items()]
                 for day, value in entries:
                     if day is None:
-                        raise ValueError(f'Некорректная дата в строке {line_number}.')
+                        totals.issues[key].append(
+                            f'{entry.filename}: строка {line_number}, дата {str(row.get(day_column))[:60]!r} не распознана.'
+                        )
+                        continue
                     if not date_from <= day <= date_to:
                         continue
                     try:
-                        quantity = Decimal(str(value).replace('\xa0', '').replace(' ', '').replace(',', '.'))
+                        quantity = Decimal(re.sub(r'\s+', '', str(value)).replace(',', '.'))
                         if not quantity.is_finite() or quantity != quantity.to_integral_value() or quantity < 0:
                             raise InvalidOperation
-                    except InvalidOperation as exc:
-                        raise ValueError(f'Некорректный остаток в строке {line_number}.') from exc
+                    except InvalidOperation:
+                        field = quantity_column if day_column and quantity_column else next(header for header, field_day in date_columns.items() if field_day == day)
+                        totals.issues[key].append(
+                            f'{entry.filename}: строка {line_number}, {day.isoformat()}, '
+                            f'поле {field!r}, остаток {str(value)[:60]!r} не является неотрицательным целым числом.'
+                        )
+                        continue
                     totals[key][day.isoformat()] += int(quantity)
     return totals
 
@@ -76,9 +90,19 @@ def apply_stock_history(products, payload, date_from, date_to):
     history = read_stock_history(payload, date_from, date_to)
     expected = {(date_from + timedelta(days=offset)).isoformat() for offset in range((date_to - date_from).days + 1)}
     for product in products:
-        quantities = history.get(('chrt', str(product.chrt_id)))
-        if quantities is None:
-            quantities = history.get(('size', str(product.nm_id), product.size))
+        product.availability_dates = None
+        product.history_warning = ''
+        key = ('chrt', str(product.chrt_id))
+        if key not in history and key not in history.issues:
+            key = ('size', str(product.nm_id), product.size)
+        quantities = history.get(key)
+        issues = history.issues.get(key)
+        if issues:
+            details = '; '.join(issues[:3])
+            if len(issues) > 3:
+                details += f'; ещё ошибок: {len(issues) - 3}'
+            product.history_warning = f'История этого товара содержит ошибки, расчёт по календарным дням: {details}'
+            continue
         if quantities is None or set(quantities) != expected:
             product.history_warning = 'История наличия неполная: скорость рассчитана по календарным дням.'
             continue
