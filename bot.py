@@ -30,8 +30,9 @@ from stock_history import apply_stock_history
 HISTORY_LOCKS = {}
 
 
-async def load_cabinet_history(client, products, from_d, to_d):
-    cache_key = hashlib.sha256(f'{client.token}:{from_d}:{to_d}'.encode()).hexdigest()
+async def load_cabinet_history(client, products, from_d, to_d, stock_mode='both'):
+    stock_type = 'mp' if stock_mode == 'fbs' else ''
+    cache_key = hashlib.sha256(f'{client.token}:{from_d}:{to_d}:{stock_type}'.encode()).hexdigest()
     lock = HISTORY_LOCKS.setdefault(cache_key, asyncio.Lock())
     cache_dir = DATA_DIR / 'stock_history'
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -40,11 +41,11 @@ async def load_cabinet_history(client, products, from_d, to_d):
         if cache_file.exists() and datetime.now().timestamp() - cache_file.stat().st_mtime < 7200:
             payload = cache_file.read_bytes()
         else:
-            payload = await client.get_daily_stock_history(from_d, to_d)
+            payload = await client.get_daily_stock_history(from_d, to_d, stock_type=stock_type)
             temporary = cache_file.with_suffix('.tmp')
             temporary.write_bytes(payload)
             temporary.replace(cache_file)
-    apply_stock_history(products, payload, from_d, to_d)
+    apply_stock_history(products, payload, from_d, to_d, stock_mode=stock_mode)
 
 
 class PurchaseState(StatesGroup):
@@ -471,15 +472,17 @@ async def receive_bundles_file(m: Message, state: FSMContext):
     await generate_purchase(m, state)
 
 
-async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, need_fbo_stock: bool = False, need_fbs_stock: bool = False):
+async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, need_fbo_stock: bool = False, need_fbs_stock: bool = False, stock_mode: str = 'both'):
     client = WBClient(token)
     cards_task = asyncio.create_task(client.get_all_cards())
     orders_task = asyncio.create_task(client.get_orders(from_d, to_d))
     cards, (orders, source) = await asyncio.gather(cards_task, orders_task)
     products = build_products(cards, cabinet_name)
     unmatched = apply_orders(products, orders, source)
+    for product in products:
+        product.availability_mode = 'fbs' if stock_mode == 'fbs' else 'both'
     try:
-        await load_cabinet_history(client, products, from_d, to_d)
+        await load_cabinet_history(client, products, from_d, to_d, stock_mode=stock_mode)
     except Exception as exc:
         for product in products:
             product.history_warning = f'История наличия недоступна, расчёт по календарным дням: {exc}'
@@ -551,8 +554,8 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
         bundles, _ = load_bundles_file(bundle_path)
 
         r1, r2 = await asyncio.gather(
-            cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, True, True),
-            cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, True, True),
+            cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, True, True, stock_mode=stock_mode),
+            cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, True, True, stock_mode=stock_mode),
         )
         products1, products2 = r1[0], r2[0]
         merged = merge_products(products1, products2)
@@ -621,7 +624,8 @@ async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
         cabinet_details = '\n'.join(
             f'{html.escape(cabinet)}: FBO {row.cabinet_fbo.get(cabinet, 0)} шт. | '
             f'целевой запас {row.cabinet_required.get(cabinet, 0)} шт. | потребность {need} шт. | '
-            f'дней наличия: {row.cabinet_days.get(cabinet) if row.cabinet_days.get(cabinet) is not None else "нет полной истории"}'
+            f'дней наличия {"FBS" if stock_mode == "fbs" else "FBO/FBS"}: '
+            f'{row.cabinet_days.get(cabinet) if row.cabinet_days.get(cabinet) is not None else "нет полной истории"}'
             for cabinet, need in row.cabinet_needs.items()
         )
         text = (
@@ -693,17 +697,17 @@ async def generate_purchase(m: Message, state: FSMContext):
         initial_errors += [e for e in bundle_errors_now if e not in initial_errors]
 
         if cabinet == '1':
-            products, src, unmatched = await cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, need_fbo_stock)
+            products, src, unmatched = await cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, need_fbo_stock, stock_mode=stock_mode)
             cabinet_name = CABINET_1_NAME
             sources = {src}
         elif cabinet == '2':
-            products, src, unmatched = await cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, need_fbo_stock)
+            products, src, unmatched = await cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, need_fbo_stock, stock_mode=stock_mode)
             cabinet_name = CABINET_2_NAME
             sources = {src}
         else:
             r1, r2 = await asyncio.gather(
-                cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, need_fbo_stock),
-                cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, need_fbo_stock),
+                cabinet_data(WB_API_KEY_1, CABINET_1_NAME, from_d, to_d, need_fbo_stock, stock_mode=stock_mode),
+                cabinet_data(WB_API_KEY_2, CABINET_2_NAME, from_d, to_d, need_fbo_stock, stock_mode=stock_mode),
             )
             products = merge_products(r1[0], r2[0])
             sources = {r1[1], r2[1]}

@@ -86,12 +86,13 @@ def read_stock_history(payload, date_from, date_to):
     return totals
 
 
-def apply_stock_history(products, payload, date_from, date_to):
+def apply_stock_history(products, payload, date_from, date_to, stock_mode='both'):
     history = read_stock_history(payload, date_from, date_to)
     expected = {(date_from + timedelta(days=offset)).isoformat() for offset in range((date_to - date_from).days + 1)}
     for product in products:
         product.availability_dates = None
         product.history_warning = ''
+        product.availability_mode = 'fbs' if stock_mode == 'fbs' else 'both'
         key = ('chrt', str(product.chrt_id))
         if key not in history and key not in history.issues:
             key = ('size', str(product.nm_id), product.size)
@@ -106,4 +107,5 @@ def apply_stock_history(products, payload, date_from, date_to):
         if quantities is None or set(quantities) != expected:
             product.history_warning = 'История наличия неполная: скорость рассчитана по календарным дням.'
             continue
-        product.availability_dates = {day for day, quantity in quantities.items() if quantity > 0} | (product.order_dates & expected)
+        order_dates = product.fbs_order_dates if stock_mode == 'fbs' else product.order_dates
+        product.availability_dates = {day for day, quantity in quantities.items() if quantity > 0} | (order_dates & expected)

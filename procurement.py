@@ -591,7 +591,8 @@ def make_procurement_excel(
         if denominator == 0 and product.total > 0:
             denominator = analysis_days
         average = product.total / denominator if denominator > 0 else 0
-        basis = product.history_warning or ('История остатков на конец дня + дни заказов' if active_days is not None else 'Календарные дни: нет полной истории')
+        availability_label = 'FBS' if product.availability_mode == 'fbs' else 'FBO/FBS'
+        basis = product.history_warning or (f'История {availability_label} на конец дня + дни заказов {availability_label}' if active_days is not None else f'Календарные дни: нет полной истории {availability_label}')
         availability_sheet.append([product.cabinet, product.nm_id, product.chrt_id, ', '.join(sorted(product.barcodes)), product.name, product.size, product.total, analysis_days, active_days, average, basis])
         availability_sheet.cell(availability_sheet.max_row, 10).number_format = '0.00'
     for index, width in enumerate([24, 18, 18, 36, 48, 14, 18, 16, 24, 24, 90], 1):

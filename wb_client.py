@@ -57,7 +57,9 @@ class WBClient:
                         raise WBApiError(f'WB API вернул не-JSON: {text[:800]}') from e
         raise WBApiError('WB API: превышено число повторных попыток')
 
-    async def get_daily_stock_history(self, date_from: date, date_to: date) -> bytes:
+    async def get_daily_stock_history(self, date_from: date, date_to: date, stock_type: str = '') -> bytes:
+        if stock_type not in {'', 'wb', 'mp'}:
+            raise ValueError('Неизвестный тип склада для истории остатков.')
         today = datetime.now(MOSCOW).date()
         month_index = today.year * 12 + today.month - 1 - 3
         oldest = date(month_index // 12, month_index % 12 + 1, 1)
@@ -73,7 +75,7 @@ class WBClient:
             'userReportName': f'Остатки {date_from} — {date_to}',
             'params': {
                 'currentPeriod': {'start': date_from.isoformat(), 'end': date_to.isoformat()},
-                'stockType': '',
+                'stockType': stock_type,
                 'skipDeletedNm': False,
             },
         })

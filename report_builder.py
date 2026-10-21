@@ -27,6 +27,8 @@ class Product:
     cabinet_products: list['Product'] = field(default_factory=list, repr=False)
     availability_dates: set[str] | None = None
     order_dates: set[str] = field(default_factory=set)
+    fbs_order_dates: set[str] = field(default_factory=set)
+    availability_mode: str = 'both'
     history_warning: str = ''
 
     @property
@@ -137,6 +139,8 @@ def apply_orders(products: list[Product], orders: list[dict], source: str) -> in
                 if ordered_at.tzinfo is not None:
                     ordered_at = ordered_at.astimezone(timezone(timedelta(hours=3)))
                 p.order_dates.add(ordered_at.date().isoformat())
+                if model == 'FBS':
+                    p.fbs_order_dates.add(ordered_at.date().isoformat())
             except ValueError:
                 pass
         if model == 'FBS':
