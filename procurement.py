@@ -91,6 +91,7 @@ class ProcurementResult:
     bundle_rows: list[BundleAuditRow]
     errors: list[tuple[str, str, str]] = field(default_factory=list)
     source_products: list[Product] = field(default_factory=list)
+    warnings: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 def _norm_header(value) -> str:
@@ -269,6 +270,7 @@ def calculate_procurement(
     initial_errors: list[tuple[str, str, str]] | None = None,
 ) -> ProcurementResult:
     errors = list(initial_errors or [])
+    warnings = []
     by_barcode = _product_barcode_index(products)
     bundle_barcodes = {b.barcode for b in bundles}
 
@@ -442,8 +444,9 @@ def calculate_procurement(
     for product in products:
         for member in product.cabinet_products or [product]:
             if member.history_warning:
-                errors.append(('История наличия', ', '.join(sorted(member.barcodes)), f'{member.cabinet}: {member.history_warning}'))
-    return ProcurementResult(rows=rows, bundle_rows=bundle_rows, errors=errors, source_products=[member for product in products for member in product.cabinet_products or [product]])
+                target = warnings if member.history_status in {'not_returned', 'missing_values', 'incomplete_period'} else errors
+                target.append(('История наличия', ', '.join(sorted(member.barcodes)), f'{member.cabinet}: {member.history_warning}'))
+    return ProcurementResult(rows=rows, bundle_rows=bundle_rows, errors=errors, warnings=warnings, source_products=[member for product in products for member in product.cabinet_products or [product]])
 
 
 def make_procurement_excel(
@@ -578,6 +581,23 @@ def make_procurement_excel(
     es.column_dimensions['B'].width = 24
     es.column_dimensions['C'].width = 90
     es.freeze_panes = 'A2'
+
+    warning_sheet = wb.create_sheet('Предупреждения')
+    warning_sheet.append(['Источник', 'Баркод', 'Описание'])
+    for cell in warning_sheet[1]:
+        cell.fill = PatternFill('solid', fgColor=navy)
+        cell.font = Font(color='FFFFFF', bold=True)
+    for warning in result.warnings:
+        warning_sheet.append(warning)
+        for cell in warning_sheet[warning_sheet.max_row]:
+            cell.fill = PatternFill('solid', fgColor=yellow)
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+    if not result.warnings:
+        warning_sheet.append(['Предупреждений нет'])
+    warning_sheet.column_dimensions['A'].width = 22
+    warning_sheet.column_dimensions['B'].width = 32
+    warning_sheet.column_dimensions['C'].width = 100
+    warning_sheet.freeze_panes = 'A2'
 
     availability_sheet = wb.create_sheet('Наличие')
     availability_sheet.append(['Кабинет', 'Артикул WB', 'ID размера', 'Баркод(ы)', 'Наименование', 'Размер', 'Заказы напрямую', 'Дней анализа', 'Дней наличия напрямую', 'Среднее прямых заказов/день', 'Основание расчёта'])

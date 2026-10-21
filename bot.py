@@ -486,6 +486,7 @@ async def cabinet_data(token: str, cabinet_name: str, from_d: date, to_d: date, 
     except Exception as exc:
         for product in products:
             product.history_warning = f'История наличия недоступна, расчёт по календарным дням: {exc}'
+            product.history_status = 'api_error'
     if need_fbo_stock:
         nm_ids = [p.nm_id for p in products if p.nm_id]
         fbo_by_chrt = await client.get_fbo_stocks(nm_ids)
@@ -744,10 +745,11 @@ async def generate_purchase(m: Message, state: FSMContext):
             f'🛒 К закупке: {purchase_total} шт. / {purchase_positions} позиций\n'
             f'🔎 Не сопоставлено заказов WB: {unmatched}\n'
             f'⚠️ Записей на листе «Ошибки»: {len(result.errors)}'
+            f'\nℹ️ Записей на листе «Предупреждения»: {len(result.warnings)}'
         )
         if 'order-feed' in sources:
             caption += '\n⚠️ Для части данных использован резервный Order Feed.'
-        history_errors = sum(1 for source, _, _ in result.errors if source == 'История наличия')
+        history_errors = sum(1 for product in result.source_products if product.history_warning)
         if history_errors:
             caption += f'\n⚠️ Без полной истории наличия: {history_errors} товаров/размеров. Для них использованы календарные дни; подробности в Excel.'
         await m.answer_document(FSInputFile(output_path, filename=filename), caption=caption)

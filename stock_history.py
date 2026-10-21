@@ -11,6 +11,7 @@ class StockHistory(defaultdict):
     def __init__(self):
         super().__init__(lambda: defaultdict(int))
         self.issues = defaultdict(list)
+        self.missing = defaultdict(list)
 
 
 def normalize(value):
@@ -43,7 +44,7 @@ def read_stock_history(payload, date_from, date_to):
                 dialect = csv.Sniffer().sniff(text[:16384], delimiters=',;\t')
             except csv.Error as exc:
                 raise ValueError('Не удалось определить разделитель CSV истории.') from exc
-            reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+            reader = csv.DictReader(io.StringIO(text), delimiter=dialect.delimiter, quotechar='"', doublequote=True, strict=True)
             headers = {normalize(header): header for header in reader.fieldnames or []}
             def column(*aliases):
                 return next((headers[normalize(alias)] for alias in aliases if normalize(alias) in headers), None)
@@ -56,6 +57,8 @@ def read_stock_history(payload, date_from, date_to):
             if not (chrt_column or (nm_column and size_column)) or not ((day_column and quantity_column) or date_columns):
                 raise ValueError('Неизвестные колонки CSV истории: ' + ', '.join(reader.fieldnames or []))
             for line_number, row in enumerate(reader, 2):
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError(f'{entry.filename}: число полей в записи {line_number} не соответствует заголовку CSV.')
                 chrt = str(row.get(chrt_column) or '').strip()
                 nm = str(row.get(nm_column) or '').strip()
                 size = str(row.get(size_column) or '0').strip()
@@ -70,6 +73,9 @@ def read_stock_history(payload, date_from, date_to):
                         )
                         continue
                     if not date_from <= day <= date_to:
+                        continue
+                    if str(value).strip() in {'', '-', '—', '–'}:
+                        totals.missing[key].append(day.isoformat())
                         continue
                     try:
                         quantity = Decimal(re.sub(r'\s+', '', str(value)).replace(',', '.'))
@@ -92,9 +98,10 @@ def apply_stock_history(products, payload, date_from, date_to, stock_mode='both'
     for product in products:
         product.availability_dates = None
         product.history_warning = ''
+        product.history_status = ''
         product.availability_mode = 'fbs' if stock_mode == 'fbs' else 'both'
         key = ('chrt', str(product.chrt_id))
-        if key not in history and key not in history.issues:
+        if key not in history and key not in history.issues and key not in history.missing:
             key = ('size', str(product.nm_id), product.size)
         quantities = history.get(key)
         issues = history.issues.get(key)
@@ -103,9 +110,21 @@ def apply_stock_history(products, payload, date_from, date_to, stock_mode='both'
             if len(issues) > 3:
                 details += f'; ещё ошибок: {len(issues) - 3}'
             product.history_warning = f'История этого товара содержит ошибки, расчёт по календарным дням: {details}'
+            product.history_status = 'invalid_data'
             continue
-        if quantities is None or set(quantities) != expected:
-            product.history_warning = 'История наличия неполная: скорость рассчитана по календарным дням.'
+        if quantities is None or set(quantities) != expected or history.missing.get(key):
+            known_days = len((set(quantities or {}) & expected) - set(history.missing.get(key, [])))
+            if quantities is None and key not in history.missing:
+                reason = f'WB не вернул историю этого товара/размера (ID размера {product.chrt_id})'
+                product.history_status = 'not_returned'
+            else:
+                missing_dates = sorted(history.missing.get(key, []))
+                reason = f'История наличия неполная: числовые остатки за {known_days} из {len(expected)} дней'
+                if missing_dates:
+                    reason += f'; WB не указал остаток за {len(set(missing_dates))} дней (прочерк или пустое значение)'
+                product.history_status = 'missing_values' if missing_dates else 'incomplete_period'
+            product.history_warning = reason + '. Скорость рассчитана по календарным дням.'
             continue
         order_dates = product.fbs_order_dates if stock_mode == 'fbs' else product.order_dates
         product.availability_dates = {day for day, quantity in quantities.items() if quantity > 0} | (order_dates & expected)
+        product.history_status = 'complete'

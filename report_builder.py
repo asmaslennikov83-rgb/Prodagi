@@ -30,6 +30,7 @@ class Product:
     fbs_order_dates: set[str] = field(default_factory=set)
     availability_mode: str = 'both'
     history_warning: str = ''
+    history_status: str = ''
 
     @property
     def total(self) -> int:
