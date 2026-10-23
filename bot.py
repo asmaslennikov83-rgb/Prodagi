@@ -685,7 +685,7 @@ async def generate_purchase(m: Message, state: FSMContext):
         coefficient = float(data['coefficient'])
         stock_mode = data.get('stock_mode', 'fbs')
         cabinet = data['cabinet']
-        need_fbo_stock = stock_mode in {'fbo', 'both'}
+        need_fbo_stock = True
 
         if stock_mode in {'fbs', 'both'}:
             stocks, stock_errors_now = load_stock_file(data['stock_path'])

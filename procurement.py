@@ -482,6 +482,8 @@ def make_procurement_excel(
     ws.merge_cells(f'A3:{last_column}3')
     mode_label = {'fbo': 'Только FBO', 'fbs': 'Только FBS', 'both': 'FBO + FBS'}.get(stock_mode, stock_mode)
     ws['A3'] = f'Целевой запас: {target_days} дн. | Коэффициент: {coefficient:g} | Учитываемые остатки: {mode_label}'
+    if stock_mode == 'fbs':
+        ws['A3'].value += ' | FBO показан справочно и не вычитается из потребности'
 
     headers = [
         'Баркод(ы)', 'Артикул продавца', 'Бренд', 'Наименование', 'К закупке', 'На сколько хватит дней',
