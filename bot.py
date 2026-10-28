@@ -26,6 +26,7 @@ from procurement import (
 from report_builder import apply_orders, build_products, merge_products
 from wb_client import MOSCOW, WBApiError, WBClient
 from stock_history import apply_stock_history
+from version import BUILD_VERSION
 
 HISTORY_LOCKS = {}
 
@@ -88,6 +89,10 @@ class AccessMiddleware(BaseMiddleware):
 
 dp.message.outer_middleware(AccessMiddleware())
 dp.callback_query.outer_middleware(AccessMiddleware())
+
+
+def main_menu_text(text='Главное меню — выберите действие:'):
+    return f'{text}\n\nВерсия сборки: {BUILD_VERSION}'
 
 
 def start_kb():
@@ -168,8 +173,8 @@ def stock_mode_kb():
 @dp.message(CommandStart())
 async def start(m: Message):
     await m.answer(
-        '📦 Бот расчёта закупок Wildberries\n\n'
-        'Учитывает заказы FBO + FBS, остатки на вашем складе и комплекты.',
+        main_menu_text('📦 Бот расчёта закупок Wildberries\n\n'
+        'Учитывает заказы FBO + FBS, остатки на вашем складе и комплекты.'),
         reply_markup=start_kb(),
     )
 
@@ -207,7 +212,7 @@ async def stock_history(m: Message):
             except Exception as exc:
                 await m.answer(f'❌ {cabinet}: не удалось получить историю остатков. {exc}', parse_mode=None)
     await status.edit_text('Запрос истории остатков завершён.')
-    await m.answer('Главное меню — выберите действие:', reply_markup=start_kb())
+    await m.answer(main_menu_text(), reply_markup=start_kb())
 
 
 
@@ -264,7 +269,7 @@ async def upload_bundles_template_file(m: Message, state: FSMContext):
     if bundle_errors:
         text += f'\n⚠️ Предупреждений при чтении: {len(bundle_errors)}.'
     text += '\n\nТеперь его можно использовать в «🔎 Ручной проверке по ШК» без полноценного отчёта.'
-    await m.answer(text, reply_markup=start_kb())
+    await m.answer(main_menu_text(text), reply_markup=start_kb())
 
 
 @dp.callback_query(F.data == 'manual_check')
@@ -522,7 +527,7 @@ async def generate_manual_check(m: Message, state: FSMContext, user_id: int):
         await _generate_manual_check(m, state, user_id)
     finally:
         await state.clear()
-        await m.answer('Главное меню — выберите действие:', reply_markup=start_kb())
+        await m.answer(main_menu_text(), reply_markup=start_kb())
 
 
 async def _generate_manual_check(m: Message, state: FSMContext, user_id: int):
@@ -737,6 +742,7 @@ async def generate_purchase(m: Message, state: FSMContext):
         purchase_positions = sum(1 for r in result.rows if r.purchase_qty > 0)
         caption = (
             f'✅ Расчёт закупки готов\n\n'
+            f'Версия сборки: {BUILD_VERSION}\n'
             f'🏢 {cabinet_name}\n'
             f'📅 Продажи: {from_d:%d.%m.%Y} — {to_d:%d.%m.%Y}\n'
             f'📦 Запас: {target_days} дней\n'

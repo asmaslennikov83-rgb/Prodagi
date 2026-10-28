@@ -13,6 +13,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from report_builder import Product
+from version import BUILD_VERSION
 
 
 @dataclass
@@ -460,6 +461,7 @@ def make_procurement_excel(
     stock_mode: str = 'fbs',
 ):
     wb = Workbook()
+    wb.properties.version = BUILD_VERSION
     ws = wb.active
     ws.title = 'Закупка'
 
@@ -484,6 +486,7 @@ def make_procurement_excel(
     ws['A3'] = f'Целевой запас: {target_days} дн. | Коэффициент: {coefficient:g} | Учитываемые остатки: {mode_label}'
     if stock_mode == 'fbs':
         ws['A3'].value += ' | FBO показан справочно и не вычитается из потребности'
+    ws['A4'] = f'Версия сборки: {BUILD_VERSION}'
 
     headers = [
         'Баркод(ы)', 'Артикул продавца', 'Бренд', 'Наименование', 'К закупке', 'На сколько хватит дней',
