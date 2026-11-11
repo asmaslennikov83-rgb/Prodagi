@@ -155,7 +155,7 @@ def stock_days_kb():
 
 def coefficient_kb():
     kb = InlineKeyboardBuilder()
-    for label, value in [('0,5', '0.5'), ('0,75', '0.75'), ('1', '1'), ('1,25', '1.25'), ('1,5', '1.5'), ('2', '2')]:
+    for label, value in [('0,5', '0.5'), ('0,75', '0.75'), ('1', '1'), ('1,25', '1.25'), ('1,5', '1.5'), ('1,75', '1.75'), ('2', '2')]:
         kb.button(text=label, callback_data=f'coef:{value}')
     kb.adjust(3, 2)
     return kb.as_markup()
