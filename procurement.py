@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -42,6 +43,7 @@ class PurchaseRow:
     total_need: int = 0
     cabinet_days: dict[str, int | None] = field(default_factory=dict)
     cabinet_average: dict[str, float] = field(default_factory=dict)
+    cabinet_rate_stocks: dict[str, list[tuple[float, int]]] = field(default_factory=dict)
 
     @property
     def total_consumption(self) -> int:
@@ -423,6 +425,7 @@ def calculate_procurement(
                     for candidate in matches
                 )
                 row.cabinet_average[cabinet] = sum(candidate.average_per_day for candidate in matches)
+                row.cabinet_rate_stocks[cabinet] = [(candidate.average_per_day, candidate.fbo_physical_stock) for candidate in matches]
                 days = [candidate.cabinet_days.get(cabinet) for candidate in matches]
                 row.cabinet_days[cabinet] = days[0] if len(days) == 1 else None
                 notes = [row.note] + [f'{cabinet}: {candidate.note}' for candidate in matches if candidate.note]
@@ -437,6 +440,7 @@ def calculate_procurement(
             cabinet = row.product.cabinet
             row.cabinet_fbo[cabinet] = row.fbo_physical_stock
             row.cabinet_average[cabinet] = row.average_per_day
+            row.cabinet_rate_stocks[cabinet] = [(row.average_per_day, row.fbo_physical_stock)]
             row.cabinet_required[cabinet] = row.required_stock
             row.total_need = max(0, row.required_stock - (row.fbo_physical_stock if stock_mode in {'fbo', 'both'} else 0))
             row.cabinet_needs[cabinet] = row.total_need
@@ -462,6 +466,7 @@ def make_procurement_excel(
 ):
     wb = Workbook()
     wb.properties.version = BUILD_VERSION
+    wb.calculation.calcMode = 'auto'
     ws = wb.active
     ws.title = 'Закупка'
 
@@ -483,10 +488,16 @@ def make_procurement_excel(
     ws['A2'] = f'Кабинет: {cabinet_name} | Период продаж: {period_text} ({analysis_days} дн.)'
     ws.merge_cells(f'A3:{last_column}3')
     mode_label = {'fbo': 'Только FBO', 'fbs': 'Только FBS', 'both': 'FBO + FBS'}.get(stock_mode, stock_mode)
-    ws['A3'] = f'Целевой запас: {target_days} дн. | Коэффициент: {coefficient:g} | Учитываемые остатки: {mode_label}'
+    ws['A3'] = f'Целевой запас: {target_days} дн. | Учитываемые остатки: {mode_label}'
     if stock_mode == 'fbs':
         ws['A3'].value += ' | FBO показан справочно и не вычитается из потребности'
     ws['A4'] = f'Версия сборки: {BUILD_VERSION}'
+    ws['B4'] = 'Общий коэффициент'
+    ws['B4'].font = Font(bold=True)
+    ws['C4'] = coefficient
+    ws['C4'].number_format = '0.00'
+    ws['C4'].fill = PatternFill('solid', fgColor=blue)
+    ws['D4'] = 'Измените C4, чтобы пересчитать все товары'
 
     headers = [
         'Баркод(ы)', 'Артикул продавца', 'Бренд', 'Наименование', 'К закупке', 'На сколько хватит дней',
@@ -506,7 +517,7 @@ def make_procurement_excel(
         values = [
             ', '.join(sorted(r.product.barcodes)), r.product.vendor_code, r.product.brand, r.product.name,
             r.purchase_qty, r.days_remaining, r.product.size or '0', r.product.fbo, r.product.fbs,
-            r.bundle_sales_units, r.total_consumption, r.average_per_day, target_days, coefficient,
+            r.bundle_sales_units, r.total_consumption, r.average_per_day, target_days, '=$C$4',
             r.required_stock, r.fbo_physical_stock, r.fbs_physical_stock, r.physical_stock, r.note,
         ]
         values += [value for cabinet in cabinets for value in (r.cabinet_fbo.get(cabinet, 0), r.cabinet_required.get(cabinet, 0), r.cabinet_needs.get(cabinet, 0), r.cabinet_days.get(cabinet) if r.cabinet_days.get(cabinet) is not None else 'Нет полной истории', r.cabinet_average.get(cabinet, 0))]
@@ -518,9 +529,29 @@ def make_procurement_excel(
         ws.cell(r_idx, 6).number_format = '0.00'
         ws.cell(r_idx, 12).number_format = '0.00'
         ws.cell(r_idx, 14).number_format = '0.00'
-        if r.purchase_qty > 0:
-            ws.cell(r_idx, 5).fill = PatternFill('solid', fgColor=green)
-            ws.cell(r_idx, 5).font = Font(bold=True)
+        required_refs = []
+        need_refs = []
+        for index, cabinet in enumerate(cabinets):
+            stock_col = 20 + index * 5
+            stock_ref = ws.cell(r_idx, stock_col).coordinate
+            rate_ref = ws.cell(r_idx, stock_col + 4).coordinate
+            members = r.cabinet_rate_stocks.get(cabinet, [])
+            inputs = [(rate_ref, stock_ref)] if len(members) <= 1 else [(repr(rate), str(stock)) for rate, stock in members]
+            required = [f'ROUNDUP(ROUND({rate}*$M{r_idx}*$C$4,10),0)' for rate, _ in inputs]
+            required_cell = ws.cell(r_idx, stock_col + 1, '=' + '+'.join(required))
+            if stock_mode in {'fbo', 'both'} and len(inputs) == 1:
+                need = f'MAX(0,{required_cell.coordinate}-{stock_ref})'
+            elif stock_mode in {'fbo', 'both'}:
+                need = '+'.join(f'MAX(0,{quantity}-{stock})' for quantity, (_, stock) in zip(required, inputs))
+            else:
+                need = required_cell.coordinate
+            need_cell = ws.cell(r_idx, stock_col + 2, '=' + need)
+            required_refs.append(required_cell.coordinate)
+            need_refs.append(need_cell.coordinate)
+        ws.cell(r_idx, 15, f'=SUM({",".join(required_refs)})')
+        total_need = ws.cell(r_idx, 20 + len(cabinets) * 5, f'=SUM({",".join(need_refs)})')
+        deduction = f'-Q{r_idx}' if stock_mode in {'fbs', 'both'} else ''
+        ws.cell(r_idx, 5, f'=MAX(0,{total_need.coordinate}{deduction})')
         if r.note:
             ws.cell(r_idx, 19).fill = PatternFill('solid', fgColor=yellow)
 
@@ -531,6 +562,7 @@ def make_procurement_excel(
     ws.freeze_panes = 'A6'
     if result.rows:
         ws.auto_filter.ref = f'A5:{last_column}{header_row + len(result.rows)}'
+        ws.conditional_formatting.add(f'E6:E{header_row + len(result.rows)}', CellIsRule(operator='greaterThan', formula=['0'], fill=PatternFill('solid', fgColor=green), font=Font(bold=True)))
     ws.row_dimensions[1].height = 24
     ws.row_dimensions[5].height = 36
 
